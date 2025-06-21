@@ -107,7 +107,7 @@ function getAllBranches(serviceName, repoPath) {
   }
 }
 
-function updateServiceBranch(serviceName, repoPath, targetBranch, useComposerUpdate = false) {
+function updateServiceBranch(serviceName, repoPath, targetBranch, useComposerUpdate = false, skipDeps = false) {
   try {
     if (!fs.existsSync(repoPath)) {
       return { service: serviceName, success: false, error: 'Directory not found' };
@@ -146,7 +146,11 @@ function updateServiceBranch(serviceName, repoPath, targetBranch, useComposerUpd
     gitCommand(repoPath, 'pull');
     
     // Update dependencies
-    updateDependencies(serviceName, repoPath, useComposerUpdate);
+    if (!skipDeps) {
+      updateDependencies(serviceName, repoPath, useComposerUpdate);
+    } else {
+      log('Skipping dependency installation', 'yellow');
+    }
     
     // Get latest commit
     const latestCommit = gitCommand(repoPath, 'log -1 --pretty=format:"%h - %s (%cr)"');
@@ -258,7 +262,7 @@ async function listAvailableBranches(serviceName = null) {
   }
 }
 
-async function updateBranches(targetBranch, serviceName = null, useComposerUpdate = false) {
+async function updateBranches(targetBranch, serviceName = null, useComposerUpdate = false, skipDeps = false) {
   if (!checkRoot()) {
     log('Error: This script must be run as root (use sudo)', 'red');
     process.exit(1);
@@ -278,7 +282,7 @@ async function updateBranches(targetBranch, serviceName = null, useComposerUpdat
   const results = [];
   
   for (const [name, path] of Object.entries(servicesToUpdate)) {
-    const result = updateServiceBranch(name, path, targetBranch, useComposerUpdate);
+    const result = updateServiceBranch(name, path, targetBranch, useComposerUpdate, skipDeps);
     results.push(result);
     log('----------------------------------------');
   }
@@ -518,13 +522,14 @@ async function main() {
     case 'update':
       if (args.length < 2) {
         log('Error: Please specify a branch name', 'red');
-        log('Usage: repo-manager.js update <branch> [service] [--composer-update]');
+        log('Usage: repo-manager.js update <branch> [service] [--composer-update] [--skip-deps]');
         process.exit(1);
       }
       const branch = args[1];
       const targetService = args[2] && !args[2].startsWith('--') ? args[2] : undefined;
       const useComposerUpdate = args.includes('--composer-update');
-      await updateBranches(branch, targetService, useComposerUpdate);
+      const skipDeps = args.includes('--skip-deps');
+      await updateBranches(branch, targetService, useComposerUpdate, skipDeps);
       break;
       
     case 'create':
@@ -549,8 +554,12 @@ Usage:
   node repo-manager.js                       # Interactive mode
   node repo-manager.js list                  # List current branches
   node repo-manager.js branches [service]    # List available branches
-  node repo-manager.js update <branch> [service] [--composer-update]  # Update to branch
+  node repo-manager.js update <branch> [service] [options]  # Update to branch
   node repo-manager.js create <ticket> [service]  # Create REN-<ticket> branch from dev
+
+Options for update:
+  --composer-update  # Use composer update instead of install
+  --skip-deps        # Skip composer/npm install entirely
 
 Examples:
   node repo-manager.js list
@@ -559,6 +568,7 @@ Examples:
   sudo node repo-manager.js update develop   # Update all to develop
   sudo node repo-manager.js update master frontend  # Update only frontend
   sudo node repo-manager.js update dev --composer-update  # Update with composer update
+  sudo node repo-manager.js update dev --skip-deps  # Update without installing dependencies
   sudo node repo-manager.js create 1234      # Create REN-1234 branch from dev
   sudo node repo-manager.js create 1234 frontend  # Create REN-1234 only for frontend
 
