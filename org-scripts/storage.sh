@@ -1,0 +1,36 @@
+#!/bin/bash
+
+DIR_SOURCE=/var/amarki/repository/microStorage/
+DIR_TARGET=/var/www/microStorage/
+
+if [[ $EUID -ne 0 ]]; then
+   echo "this script must be run as root"
+   exit 1
+fi
+
+echo "Stopping Workers"
+supervisorctl stop all
+
+cd ${DIR_SOURCE}
+echo "Pulling Last Master Branch"
+sudo -u www-data git fetch
+sudo -u www-data git checkout "master"
+sudo -u www-data git pull
+
+echo "Updating Composer Packages"
+sudo -uwww-data composer install
+
+cd ${DIR_TARGET}
+echo "Syncing Files"
+sudo -uwww-data rsync --progress -rt --del --exclude-from="/var/amarki/exclude-micro" ${DIR_SOURCE} ${DIR_TARGET}
+
+echo "Setting Users, Groups and Permissions"
+chown www-data:www-data -R ${DIR_TARGET}
+
+echo "Database Update"
+cd ${DIR_TARGET}
+sudo -uwww-data php artisan migrate
+
+echo "Starting Workers"
+supervisorctl reread
+supervisorctl start all

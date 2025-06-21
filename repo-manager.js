@@ -167,22 +167,27 @@ function updateDependencies(serviceName, repoPath, useUpdate = false) {
       const command = useUpdate ? 'update' : 'install';
       log(`Running composer ${command}...`);
       
-      // Services that use PHP 7.4 with default composer (based on users.sh)
-      const php74Services = ['users', 'images'];
+      // Services that use default composer (based on shell scripts)
+      const defaultComposerServices = ['users', 'images'];
       
-      // Services that use PHP 8.2 with Composer 2.6 (based on frontend.sh)
-      const php82Services = ['frontend'];
+      // Services that use PHP 8.2 with Composer 2.6 (based on shell scripts)
+      const php82Services = ['emails', 'frontend', 'integrations', 'sms', 'templates'];
       
-      // All other services use PHP 8.1 with Composer 2.6 (based on ads.sh pattern)
-      if (php74Services.includes(serviceName)) {
-        // users.sh just uses 'composer install' without full path
+      // Services that use PHP 8.1 with Composer 2.6 (based on shell scripts)
+      const php81Services = ['ads', 'social'];
+      
+      if (defaultComposerServices.includes(serviceName)) {
+        // users.sh and images.sh just use 'composer install' without full path
         execCommand(`sudo -u www-data composer ${command} --no-interaction`, { cwd: repoPath });
       } else if (php82Services.includes(serviceName)) {
-        // frontend.sh uses full paths: /usr/bin/php8.2 /usr/local/bin/composer26
+        // Uses full paths: /usr/bin/php8.2 /usr/local/bin/composer26
         execCommand(`sudo -u www-data /usr/bin/php8.2 /usr/local/bin/composer26 ${command} --no-interaction`, { cwd: repoPath });
-      } else {
-        // ads.sh pattern: /usr/bin/php8.1 /usr/local/bin/composer26
+      } else if (php81Services.includes(serviceName)) {
+        // Uses full paths: /usr/bin/php8.1 /usr/local/bin/composer26
         execCommand(`sudo -u www-data /usr/bin/php8.1 /usr/local/bin/composer26 ${command} --no-interaction`, { cwd: repoPath });
+      } else {
+        // Default fallback
+        execCommand(`sudo -u www-data composer ${command} --no-interaction`, { cwd: repoPath });
       }
     }
     

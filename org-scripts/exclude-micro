@@ -1,0 +1,8 @@
+/.docker
+/.git
+/.gitignore
+/.env
+/composer.json
+/composer.lock
+/storage
+/public/storage

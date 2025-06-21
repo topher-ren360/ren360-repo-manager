@@ -1,0 +1,7 @@
+/.docker
+/.git
+/.gitignore
+/.env
+/storage
+/public/storage
+public/ren-success-system
