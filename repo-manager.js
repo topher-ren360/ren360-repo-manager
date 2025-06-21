@@ -325,6 +325,99 @@ async function updateBranches(targetBranch, serviceName = null, useComposerUpdat
   }
 }
 
+async function createBranch(ticketNumber, serviceName = null) {
+  if (!checkRoot()) {
+    log('Error: This script must be run as root (use sudo)', 'red');
+    process.exit(1);
+  }
+  
+  const branchName = `REN-${ticketNumber}`;
+  log(`\n=== Creating Branch: ${branchName} from dev ===\n`, 'cyan');
+  
+  const servicesToUpdate = serviceName 
+    ? { [serviceName]: services[serviceName] }
+    : services;
+  
+  if (serviceName && !services[serviceName]) {
+    log(`Error: Service '${serviceName}' not found`, 'red');
+    return;
+  }
+  
+  const results = [];
+  
+  for (const [name, path] of Object.entries(servicesToUpdate)) {
+    log(`\n${colors.yellow}Creating branch for ${name}...${colors.reset}`);
+    
+    try {
+      // Check if directory exists
+      if (!fs.existsSync(path)) {
+        results.push({ service: name, success: false, error: 'Directory not found' });
+        continue;
+      }
+      
+      // Get current branch
+      const currentBranch = gitCommand(path, 'rev-parse --abbrev-ref HEAD');
+      log(`Current branch: ${currentBranch}`);
+      
+      // Fetch latest changes
+      log('Fetching latest changes...');
+      gitCommand(path, 'fetch');
+      
+      // Checkout dev branch first
+      log('Checking out dev branch...');
+      gitCommand(path, 'checkout dev');
+      
+      // Pull latest dev changes
+      log('Pulling latest dev changes...');
+      gitCommand(path, 'pull');
+      
+      // Create and checkout new branch
+      log(`Creating branch ${branchName}...`);
+      try {
+        gitCommand(path, `checkout -b ${branchName}`);
+        log(`${colors.green}Success: ${name} - created branch ${branchName}${colors.reset}`);
+        results.push({ service: name, success: true, branch: branchName });
+      } catch (error) {
+        // Branch might already exist
+        if (error.message.includes('already exists')) {
+          log(`Branch ${branchName} already exists, checking it out...`, 'yellow');
+          gitCommand(path, `checkout ${branchName}`);
+          results.push({ service: name, success: true, branch: branchName, existing: true });
+        } else {
+          throw error;
+        }
+      }
+      
+    } catch (error) {
+      log(`${colors.red}Error: ${error.message}${colors.reset}`);
+      results.push({ service: name, success: false, error: error.message });
+    }
+    
+    log('----------------------------------------');
+  }
+  
+  // Summary
+  log('\n=== Branch Creation Summary ===\n', 'cyan');
+  
+  const successful = results.filter(r => r.success);
+  const failed = results.filter(r => !r.success);
+  
+  if (successful.length > 0) {
+    log(`Successfully created/checked out: ${successful.length} service(s)`, 'green');
+    successful.forEach(r => {
+      const status = r.existing ? '(existing)' : '(new)';
+      log(`  ✓ ${r.service} -> ${r.branch} ${status}`, 'green');
+    });
+  }
+  
+  if (failed.length > 0) {
+    log(`\nFailed to create branch: ${failed.length} service(s)`, 'red');
+    failed.forEach(r => log(`  ✗ ${r.service}: ${r.error}`, 'red'));
+  }
+  
+  return results;
+}
+
 async function interactiveMode() {
   const rl = readline.createInterface({
     input: process.stdin,
@@ -340,9 +433,10 @@ async function interactiveMode() {
     console.log('3. List available branches (single service)');
     console.log('4. Update all services to a branch');
     console.log('5. Update single service to a branch');
-    console.log('6. Exit');
+    console.log('6. Create new branch from dev (REN-<ticket>)');
+    console.log('7. Exit');
     
-    const choice = await question('\nSelect an option (1-6): ');
+    const choice = await question('\nSelect an option (1-7): ');
     
     switch (choice) {
       case '1':
@@ -378,6 +472,16 @@ async function interactiveMode() {
         break;
         
       case '6':
+        if (!checkRoot()) {
+          log('Error: Branch creation requires root privileges. Please run with sudo.', 'red');
+          break;
+        }
+        const ticketNumber = await question('Enter ticket number (e.g., 1234 for REN-1234): ');
+        const serviceForCreate = await question('Enter service name (or press Enter for all services): ');
+        await createBranch(ticketNumber, serviceForCreate || null);
+        break;
+        
+      case '7':
         rl.close();
         process.exit(0);
         
@@ -423,6 +527,18 @@ async function main() {
       await updateBranches(branch, targetService, useComposerUpdate);
       break;
       
+    case 'create':
+    case 'create-branch':
+      if (args.length < 2) {
+        log('Error: Please specify a ticket number', 'red');
+        log('Usage: repo-manager.js create <ticket-number> [service]');
+        process.exit(1);
+      }
+      const ticketNum = args[1];
+      const createService = args[2];
+      await createBranch(ticketNum, createService);
+      break;
+      
     case 'help':
     case '--help':
     case '-h':
@@ -434,6 +550,7 @@ Usage:
   node repo-manager.js list                  # List current branches
   node repo-manager.js branches [service]    # List available branches
   node repo-manager.js update <branch> [service] [--composer-update]  # Update to branch
+  node repo-manager.js create <ticket> [service]  # Create REN-<ticket> branch from dev
 
 Examples:
   node repo-manager.js list
@@ -442,6 +559,8 @@ Examples:
   sudo node repo-manager.js update develop   # Update all to develop
   sudo node repo-manager.js update master frontend  # Update only frontend
   sudo node repo-manager.js update dev --composer-update  # Update with composer update
+  sudo node repo-manager.js create 1234      # Create REN-1234 branch from dev
+  sudo node repo-manager.js create 1234 frontend  # Create REN-1234 only for frontend
 
 Services:
   ${Object.keys(services).join(', ')}
