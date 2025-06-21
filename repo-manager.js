@@ -280,6 +280,148 @@ async function listAvailableBranches(serviceName = null) {
   }
 }
 
+function getRepositoryStatus(serviceName, repoPath) {
+  try {
+    if (!fs.existsSync(repoPath)) {
+      return { service: serviceName, error: 'Directory not found' };
+    }
+    
+    // Get current branch
+    const currentBranch = gitCommand(repoPath, 'rev-parse --abbrev-ref HEAD');
+    
+    // Check for uncommitted changes
+    let uncommittedFiles = 0;
+    let hasUnstagedChanges = false;
+    let hasStagedChanges = false;
+    
+    try {
+      // Check for unstaged changes
+      gitCommand(repoPath, 'diff-index --quiet HEAD --');
+    } catch {
+      hasUnstagedChanges = true;
+    }
+    
+    try {
+      // Check for staged changes
+      const stagedOutput = gitCommand(repoPath, 'diff --cached --numstat');
+      if (stagedOutput) {
+        hasStagedChanges = true;
+      }
+    } catch {}
+    
+    try {
+      // Count modified files
+      const modifiedFiles = gitCommand(repoPath, 'status --porcelain');
+      if (modifiedFiles) {
+        uncommittedFiles = modifiedFiles.split('\n').filter(line => line.trim()).length;
+      }
+    } catch {}
+    
+    // Check commits ahead/behind
+    let commitsAhead = 0;
+    let commitsBehind = 0;
+    
+    try {
+      // Fetch to ensure we have latest remote info (but don't pull)
+      gitCommand(repoPath, 'fetch --quiet');
+      
+      // Get ahead/behind counts
+      const revList = gitCommand(repoPath, `rev-list --left-right --count ${currentBranch}...origin/${currentBranch}`);
+      const [ahead, behind] = revList.split('\t').map(n => parseInt(n));
+      commitsAhead = ahead || 0;
+      commitsBehind = behind || 0;
+    } catch {
+      // Branch might not have upstream
+    }
+    
+    return {
+      service: serviceName,
+      branch: currentBranch,
+      uncommittedFiles,
+      hasUnstagedChanges,
+      hasStagedChanges,
+      commitsAhead,
+      commitsBehind,
+      isClean: uncommittedFiles === 0 && commitsAhead === 0 && commitsBehind === 0
+    };
+  } catch (error) {
+    return { service: serviceName, error: error.message };
+  }
+}
+
+async function showRepositoryStatus(serviceName = null) {
+  log('\n=== Repository Status Overview ===\n', 'cyan', true);
+  
+  const servicesToCheck = serviceName 
+    ? { [serviceName]: services[serviceName] }
+    : services;
+    
+  if (serviceName && !services[serviceName]) {
+    log(`Error: Service '${serviceName}' not found`, 'red', true);
+    return;
+  }
+  
+  const results = [];
+  
+  // Collect all statuses
+  for (const [name, path] of Object.entries(servicesToCheck)) {
+    const status = getRepositoryStatus(name, path);
+    results.push(status);
+  }
+  
+  // Find max lengths for formatting
+  const maxServiceLength = Math.max(...results.map(r => r.service.length));
+  const maxBranchLength = Math.max(...results.filter(r => r.branch).map(r => r.branch.length), 10);
+  
+  // Display results
+  results.forEach(status => {
+    const service = status.service.padEnd(maxServiceLength);
+    
+    if (status.error) {
+      log(`${service}  ${colors.red}Error: ${status.error}${colors.reset}`, 'reset', true);
+      return;
+    }
+    
+    const branch = (status.branch || 'unknown').padEnd(maxBranchLength);
+    let statusText = '';
+    let statusColor = 'green';
+    
+    if (status.isClean) {
+      statusText = '✓ clean';
+      statusColor = 'green';
+    } else {
+      const parts = [];
+      
+      if (status.uncommittedFiles > 0) {
+        parts.push(`${status.uncommittedFiles} uncommitted`);
+        statusColor = 'yellow';
+      }
+      
+      if (status.commitsAhead > 0) {
+        parts.push(`${status.commitsAhead} ahead`);
+        statusColor = 'yellow';
+      }
+      
+      if (status.commitsBehind > 0) {
+        parts.push(`${status.commitsBehind} behind`);
+        statusColor = 'red';
+      }
+      
+      statusText = '⚠ ' + parts.join(', ');
+    }
+    
+    log(`${service}  ${branch}  ${colors[statusColor]}${statusText}${colors.reset}`, 'reset', true);
+  });
+  
+  // Summary
+  const clean = results.filter(r => r.isClean).length;
+  const withIssues = results.filter(r => !r.isClean && !r.error).length;
+  const withErrors = results.filter(r => r.error).length;
+  
+  log('', 'reset', true);
+  log(`Summary: ${colors.green}${clean} clean${colors.reset}, ${colors.yellow}${withIssues} need attention${colors.reset}${withErrors > 0 ? `, ${colors.red}${withErrors} errors${colors.reset}` : ''}`, 'reset', true);
+}
+
 async function updateBranches(targetBranch, serviceName = null, useComposerUpdate = false, skipDeps = false) {
   if (!checkRoot()) {
     log('Error: This script must be run as root (use sudo)', 'red', true);
@@ -458,9 +600,10 @@ async function interactiveMode() {
     console.log('4. Update all services to a branch');
     console.log('5. Update single service to a branch');
     console.log('6. Create new branch from dev (REN-<ticket>)');
-    console.log('7. Exit');
+    console.log('7. Show repository status');
+    console.log('8. Exit');
     
-    const choice = await question('\nSelect an option (1-7): ');
+    const choice = await question('\nSelect an option (1-8): ');
     
     switch (choice) {
       case '1':
@@ -506,6 +649,11 @@ async function interactiveMode() {
         break;
         
       case '7':
+        const serviceForStatus = await question('Enter service name (or press Enter for all services): ');
+        await showRepositoryStatus(serviceForStatus || null);
+        break;
+        
+      case '8':
         rl.close();
         process.exit(0);
         
@@ -574,6 +722,11 @@ async function main() {
       await createBranch(ticketNum, createService);
       break;
       
+    case 'status':
+      const statusService = args[1];
+      await showRepositoryStatus(statusService);
+      break;
+      
     case 'help':
     case '--help':
     case '-h':
@@ -584,6 +737,7 @@ Usage:
   node repo-manager.js                       # Interactive mode
   node repo-manager.js list                  # List current branches
   node repo-manager.js branches [service]    # List available branches
+  node repo-manager.js status [service]       # Show repository status
   node repo-manager.js update <branch> [service] [options]  # Update to branch
   node repo-manager.js create <ticket> [service]  # Create REN-<ticket> branch from dev
 
@@ -603,6 +757,8 @@ Examples:
   sudo node repo-manager.js update dev --verbose    # Update with detailed output
   sudo node repo-manager.js create 1234      # Create REN-1234 branch from dev
   sudo node repo-manager.js create 1234 frontend  # Create REN-1234 only for frontend
+  node repo-manager.js status                # Show status of all repos
+  node repo-manager.js status frontend       # Show status of specific repo
 
 Services:
   ${Object.keys(services).join(', ')}
