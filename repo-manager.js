@@ -17,6 +17,25 @@ try {
   // AI module not available
 }
 
+// Load environment variables including GH_TOKEN
+function loadEnvVar(varName) {
+  const envPath = path.join(__dirname, '.env');
+  if (fs.existsSync(envPath)) {
+    const envContent = fs.readFileSync(envPath, 'utf8');
+    const match = envContent.match(new RegExp(`${varName}=(.+)`));
+    if (match) {
+      return match[1].trim();
+    }
+  }
+  return process.env[varName];
+}
+
+// Set GH_TOKEN if available
+const ghToken = loadEnvVar('GH_TOKEN');
+if (ghToken) {
+  process.env.GH_TOKEN = ghToken;
+}
+
 // Color codes for console output
 const colors = {
   reset: '\x1b[0m',
@@ -1337,6 +1356,78 @@ async function createBranch(ticketNumber, serviceName = null) {
   return results;
 }
 
+async function setupGitHubToken() {
+  log('\n=== GitHub Token Setup ===\n', 'cyan', true);
+  
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+  
+  const question = (query) => new Promise((resolve) => rl.question(query, resolve));
+  
+  try {
+    log('To use GitHub PR features, you need a GitHub Personal Access Token.', 'reset', true);
+    log('Get your token from: https://github.com/settings/tokens', 'blue', true);
+    log('\nRequired permissions:', 'reset', true);
+    log('  - repo (for private repositories)', 'reset', true);
+    log('  - read:org (optional, for organization repos)', 'reset', true);
+    
+    const token = await question('\nEnter your GitHub token: ');
+    
+    if (!token || token.trim().length < 10) {
+      log('Invalid token. Setup cancelled.', 'red', true);
+      rl.close();
+      return;
+    }
+    
+    // Update or create .env file
+    const envPath = path.join(__dirname, '.env');
+    let envContent = '';
+    
+    if (fs.existsSync(envPath)) {
+      envContent = fs.readFileSync(envPath, 'utf8');
+      // Remove existing GH_TOKEN if present
+      envContent = envContent.replace(/GH_TOKEN=.*/g, '');
+      // Ensure it ends with newline
+      if (!envContent.endsWith('\n')) {
+        envContent += '\n';
+      }
+    }
+    
+    // Add the new token
+    envContent += `\n# GitHub API Token\nGH_TOKEN=${token.trim()}\n`;
+    
+    fs.writeFileSync(envPath, envContent);
+    log('\n✓ GitHub token saved to .env', 'green', true);
+    
+    // Set it for current process
+    process.env.GH_TOKEN = token.trim();
+    
+    // Test the token
+    log('\nTesting GitHub token...', 'yellow', true);
+    
+    try {
+      // Try to list user repos as a test
+      execCommand('gh api user', { encoding: 'utf8' });
+      log('✓ GitHub token configured successfully!', 'green', true);
+      
+      log('\nYou can now use:', 'reset', true);
+      log('  node repo-manager.js prs              # List all PRs', 'green', true);
+      log('  node repo-manager.js review <ticket>  # Review PRs by ticket', 'green', true);
+      
+    } catch (error) {
+      log(`✗ Token test failed: ${error.message}`, 'red', true);
+      log('Please check your token and permissions.', 'yellow', true);
+    }
+    
+  } catch (error) {
+    log(`Setup error: ${error.message}`, 'red', true);
+  } finally {
+    rl.close();
+  }
+}
+
 async function setupAIConfiguration() {
   log('\n=== AI Configuration Setup ===\n', 'cyan', true);
   
@@ -1662,6 +1753,11 @@ async function main() {
       await setupAIConfiguration();
       break;
       
+    case 'setup-github':
+    case 'setup-gh':
+      await setupGitHubToken();
+      break;
+      
     case 'help':
     case '--help':
     case '-h':
@@ -1681,6 +1777,7 @@ Usage:
   node repo-manager.js prs [--state=open|closed|all]       # List all PRs
   node repo-manager.js review <ticket-number> [--analyze]  # Review PRs by ticket
   node repo-manager.js setup-ai                            # Configure AI agent
+  node repo-manager.js setup-github                        # Configure GitHub token
   node repo-manager.js update <branch> [service] [options]  # Update to branch
   node repo-manager.js create <ticket> [service]  # Create REN-<ticket> branch from dev
 
