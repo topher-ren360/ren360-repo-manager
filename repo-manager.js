@@ -491,6 +491,460 @@ async function updateBranches(targetBranch, serviceName = null, useComposerUpdat
   }
 }
 
+async function syncRepositories(serviceName = null) {
+  log(`\n=== Syncing Repositories ===\n`, 'cyan', true);
+  
+  const servicesToSync = serviceName 
+    ? { [serviceName]: services[serviceName] }
+    : services;
+    
+  if (serviceName && !services[serviceName]) {
+    log(`Error: Service '${serviceName}' not found`, 'red', true);
+    return;
+  }
+  
+  const results = [];
+  
+  for (const [name, path] of Object.entries(servicesToSync)) {
+    if (!VERBOSE) {
+      process.stdout.write(`${colors.yellow}${name}${colors.reset}... `);
+    } else {
+      log(`\nSyncing ${name}...`, 'yellow');
+    }
+    
+    try {
+      if (!fs.existsSync(path)) {
+        results.push({ service: name, success: false, error: 'Directory not found' });
+        if (!VERBOSE) console.log(`${colors.red}✗${colors.reset}`);
+        continue;
+      }
+      
+      // Get current branch
+      const currentBranch = gitCommand(path, 'rev-parse --abbrev-ref HEAD');
+      log(`Current branch: ${currentBranch}`);
+      
+      // Check for uncommitted changes
+      try {
+        gitCommand(path, 'diff-index --quiet HEAD --');
+      } catch {
+        results.push({ service: name, success: false, error: 'Has uncommitted changes' });
+        if (!VERBOSE) {
+          console.log(`${colors.red}✗ (uncommitted changes)${colors.reset}`);
+        } else {
+          log('Error: Has uncommitted changes', 'red');
+        }
+        continue;
+      }
+      
+      // Fetch and pull
+      log('Fetching latest changes...');
+      gitCommand(path, 'fetch');
+      
+      log('Pulling latest changes...');
+      const pullOutput = gitCommand(path, 'pull');
+      
+      if (!VERBOSE) {
+        console.log(`${colors.green}✓${colors.reset}`);
+      } else {
+        log(`Success: ${name} synced`, 'green');
+        if (pullOutput.includes('Already up to date')) {
+          log('Already up to date');
+        } else {
+          log(pullOutput);
+        }
+      }
+      
+      results.push({ service: name, success: true, branch: currentBranch });
+      
+    } catch (error) {
+      results.push({ service: name, success: false, error: error.message });
+      if (!VERBOSE) {
+        console.log(`${colors.red}✗${colors.reset}`);
+      } else {
+        log(`Error: ${error.message}`, 'red');
+      }
+    }
+    
+    if (VERBOSE) {
+      log('----------------------------------------');
+    }
+  }
+  
+  // Summary
+  log('\n=== Sync Summary ===\n', 'cyan', true);
+  
+  const successful = results.filter(r => r.success);
+  const failed = results.filter(r => !r.success);
+  
+  if (successful.length > 0) {
+    log(`Successfully synced: ${successful.length} service(s)`, 'green', true);
+    successful.forEach(r => log(`  ✓ ${r.service} (${r.branch})`, 'green', true));
+  }
+  
+  if (failed.length > 0) {
+    log(`\nFailed to sync: ${failed.length} service(s)`, 'red', true);
+    failed.forEach(r => log(`  ✗ ${r.service}: ${r.error}`, 'red', true));
+  }
+}
+
+async function searchInRepositories(searchPattern, options = {}) {
+  const { service: serviceName, include } = options;
+  
+  log(`\n=== Searching for: "${searchPattern}" ===\n`, 'cyan', true);
+  
+  const servicesToSearch = serviceName 
+    ? { [serviceName]: services[serviceName] }
+    : services;
+    
+  if (serviceName && !services[serviceName]) {
+    log(`Error: Service '${serviceName}' not found`, 'red', true);
+    return;
+  }
+  
+  let totalMatches = 0;
+  const results = [];
+  
+  for (const [name, path] of Object.entries(servicesToSearch)) {
+    try {
+      if (!fs.existsSync(path)) {
+        continue;
+      }
+      
+      // Build ripgrep command
+      let rgCommand = `rg "${searchPattern}" --count --color never`;
+      if (include) {
+        rgCommand += ` --glob "${include}"`;
+      }
+      
+      const output = execCommand(rgCommand, { cwd: path });
+      
+      if (output) {
+        const matches = output.split('\n').filter(line => line.trim());
+        const serviceMatches = matches.reduce((sum, line) => {
+          const count = parseInt(line.split(':').pop());
+          return sum + (isNaN(count) ? 0 : count);
+        }, 0);
+        
+        if (serviceMatches > 0) {
+          totalMatches += serviceMatches;
+          results.push({
+            service: name,
+            matches: serviceMatches,
+            files: matches.length
+          });
+          
+          // Show details
+          log(`\n${colors.yellow}${name}:${colors.reset} ${serviceMatches} matches in ${matches.length} files`, 'reset', true);
+          
+          if (VERBOSE) {
+            // Show actual matches with context
+            const detailCommand = `rg "${searchPattern}" -n --color never -m 3`;
+            const details = execCommand(detailCommand + (include ? ` --glob "${include}"` : ''), { cwd: path });
+            const lines = details.split('\n').slice(0, 10); // Show first 10 matches
+            lines.forEach(line => {
+              if (line.trim()) {
+                log(`  ${line}`, 'reset', true);
+              }
+            });
+            if (details.split('\n').length > 10) {
+              log(`  ... and ${details.split('\n').length - 10} more matches`, 'reset', true);
+            }
+          }
+        }
+      }
+    } catch (error) {
+      // No matches found or rg not available
+    }
+  }
+  
+  // Summary
+  log('\n' + '='.repeat(50), 'reset', true);
+  if (totalMatches > 0) {
+    log(`Total: ${colors.green}${totalMatches} matches${colors.reset} across ${results.length} services`, 'reset', true);
+    
+    if (!VERBOSE) {
+      log('\nUse --verbose to see match details', 'reset', true);
+    }
+  } else {
+    log(`No matches found for "${searchPattern}"`, 'yellow', true);
+  }
+}
+
+async function showRecentActivity(options = {}) {
+  const { service: serviceName, days = 7, count = 5 } = options;
+  
+  log(`\n=== Recent Activity (Last ${days} days) ===\n`, 'cyan', true);
+  
+  const servicesToCheck = serviceName 
+    ? { [serviceName]: services[serviceName] }
+    : services;
+    
+  if (serviceName && !services[serviceName]) {
+    log(`Error: Service '${serviceName}' not found`, 'red', true);
+    return;
+  }
+  
+  const since = new Date();
+  since.setDate(since.getDate() - days);
+  const sinceStr = since.toISOString().split('T')[0];
+  
+  let totalCommits = 0;
+  
+  for (const [name, path] of Object.entries(servicesToCheck)) {
+    try {
+      if (!fs.existsSync(path)) {
+        continue;
+      }
+      
+      // Get recent commits
+      const logCommand = `git log --since="${sinceStr}" --pretty=format:"%h|%an|%cr|%s" -n ${count}`;
+      const commits = gitCommand(path, logCommand);
+      
+      if (commits) {
+        const commitLines = commits.split('\n').filter(line => line.trim());
+        if (commitLines.length > 0) {
+          totalCommits += commitLines.length;
+          
+          log(`\n${colors.yellow}${name}:${colors.reset}`, 'reset', true);
+          
+          commitLines.forEach(line => {
+            const [hash, author, when, message] = line.split('|');
+            log(`  ${colors.blue}${hash}${colors.reset} - ${message} ${colors.green}(${when})${colors.reset} by ${author}`, 'reset', true);
+          });
+          
+          // Check if there are more commits
+          const totalCount = gitCommand(path, `git rev-list --count --since="${sinceStr}" HEAD`);
+          if (parseInt(totalCount) > count) {
+            log(`  ... and ${parseInt(totalCount) - count} more commits`, 'reset', true);
+          }
+        }
+      }
+    } catch (error) {
+      // No commits or error
+    }
+  }
+  
+  // Summary
+  log('\n' + '='.repeat(50), 'reset', true);
+  if (totalCommits > 0) {
+    log(`Total: ${colors.green}${totalCommits} recent commits${colors.reset} shown`, 'reset', true);
+  } else {
+    log(`No commits found in the last ${days} days`, 'yellow', true);
+  }
+}
+
+async function manageStash(action, message = '') {
+  if (!['save', 'pop', 'list'].includes(action)) {
+    log('Error: Invalid stash action. Use save, pop, or list', 'red', true);
+    return;
+  }
+  
+  log(`\n=== Stash ${action.charAt(0).toUpperCase() + action.slice(1)} ===\n`, 'cyan', true);
+  
+  const results = [];
+  
+  for (const [name, path] of Object.entries(services)) {
+    try {
+      if (!fs.existsSync(path)) {
+        continue;
+      }
+      
+      let result = '';
+      
+      switch (action) {
+        case 'save':
+          // Check if there are changes to stash
+          try {
+            gitCommand(path, 'diff-index --quiet HEAD --');
+            results.push({ service: name, action, status: 'no changes' });
+          } catch {
+            // Has changes, stash them
+            const stashMessage = message || `repo-manager stash ${new Date().toISOString()}`;
+            result = gitCommand(path, `stash push -m "${stashMessage}"`);
+            results.push({ service: name, action, status: 'saved', message: stashMessage });
+          }
+          break;
+          
+        case 'pop':
+          try {
+            result = gitCommand(path, 'stash pop');
+            results.push({ service: name, action, status: 'popped' });
+          } catch (error) {
+            if (error.message.includes('No stash entries')) {
+              results.push({ service: name, action, status: 'no stash' });
+            } else {
+              results.push({ service: name, action, status: 'error', error: error.message });
+            }
+          }
+          break;
+          
+        case 'list':
+          try {
+            result = gitCommand(path, 'stash list');
+            const stashCount = result ? result.split('\n').filter(l => l.trim()).length : 0;
+            results.push({ service: name, action, status: 'list', count: stashCount, list: result });
+          } catch {
+            results.push({ service: name, action, status: 'list', count: 0 });
+          }
+          break;
+      }
+      
+      // Display result
+      if (action === 'list') {
+        if (results[results.length - 1].count > 0) {
+          log(`\n${colors.yellow}${name}:${colors.reset} ${results[results.length - 1].count} stashes`, 'reset', true);
+          if (VERBOSE && result) {
+            result.split('\n').forEach(line => {
+              if (line.trim()) {
+                log(`  ${line}`, 'reset', true);
+              }
+            });
+          }
+        }
+      } else {
+        const lastResult = results[results.length - 1];
+        const statusColor = lastResult.status === 'error' ? 'red' : 
+                          lastResult.status === 'no changes' || lastResult.status === 'no stash' ? 'yellow' : 
+                          'green';
+        log(`${name}: ${colors[statusColor]}${lastResult.status}${colors.reset}`, 'reset', true);
+      }
+      
+    } catch (error) {
+      results.push({ service: name, action, status: 'error', error: error.message });
+      log(`${name}: ${colors.red}error - ${error.message}${colors.reset}`, 'reset', true);
+    }
+  }
+  
+  // Summary
+  log('\n' + '='.repeat(50), 'reset', true);
+  
+  if (action === 'save') {
+    const saved = results.filter(r => r.status === 'saved').length;
+    const noChanges = results.filter(r => r.status === 'no changes').length;
+    log(`Stashed changes in ${colors.green}${saved} services${colors.reset}, ${colors.yellow}${noChanges} had no changes${colors.reset}`, 'reset', true);
+  } else if (action === 'pop') {
+    const popped = results.filter(r => r.status === 'popped').length;
+    const noStash = results.filter(r => r.status === 'no stash').length;
+    log(`Popped stash in ${colors.green}${popped} services${colors.reset}, ${colors.yellow}${noStash} had no stash${colors.reset}`, 'reset', true);
+  } else if (action === 'list') {
+    const withStashes = results.filter(r => r.count > 0).length;
+    const totalStashes = results.reduce((sum, r) => sum + (r.count || 0), 0);
+    log(`Found ${colors.green}${totalStashes} total stashes${colors.reset} across ${withStashes} services`, 'reset', true);
+    if (!VERBOSE && totalStashes > 0) {
+      log('Use --verbose to see stash details', 'reset', true);
+    }
+  }
+}
+
+async function createPullRequest(options = {}) {
+  const { title, body, draft = false, service: serviceName } = options;
+  
+  if (!title) {
+    log('Error: PR title is required', 'red', true);
+    return;
+  }
+  
+  log(`\n=== Creating Pull Request ===\n`, 'cyan', true);
+  
+  const servicesToProcess = serviceName 
+    ? { [serviceName]: services[serviceName] }
+    : services;
+    
+  if (serviceName && !services[serviceName]) {
+    log(`Error: Service '${serviceName}' not found`, 'red', true);
+    return;
+  }
+  
+  const results = [];
+  
+  for (const [name, path] of Object.entries(servicesToProcess)) {
+    try {
+      if (!fs.existsSync(path)) {
+        continue;
+      }
+      
+      // Get current branch
+      const currentBranch = gitCommand(path, 'rev-parse --abbrev-ref HEAD');
+      
+      if (currentBranch === 'master' || currentBranch === 'main') {
+        results.push({ 
+          service: name, 
+          success: false, 
+          error: 'Cannot create PR from master/main branch' 
+        });
+        log(`${name}: ${colors.red}✗ Cannot create PR from ${currentBranch}${colors.reset}`, 'reset', true);
+        continue;
+      }
+      
+      // Check if branch has upstream
+      try {
+        gitCommand(path, `rev-parse --abbrev-ref ${currentBranch}@{upstream}`);
+      } catch {
+        // Push branch to origin first
+        log(`${name}: Pushing branch to origin...`);
+        gitCommand(path, `push -u origin ${currentBranch}`);
+      }
+      
+      // Create PR using GitHub CLI
+      let ghCommand = `gh pr create --title "${title}"`;
+      
+      if (body) {
+        ghCommand += ` --body "${body}"`;
+      } else {
+        ghCommand += ` --body "Auto-generated PR for ${currentBranch}"`;
+      }
+      
+      if (draft) {
+        ghCommand += ' --draft';
+      }
+      
+      // Add base branch (usually main or master)
+      const defaultBranch = gitCommand(path, 'symbolic-ref refs/remotes/origin/HEAD | sed "s@^refs/remotes/origin/@@"');
+      ghCommand += ` --base ${defaultBranch}`;
+      
+      const prUrl = execCommand(ghCommand, { cwd: path });
+      
+      results.push({ 
+        service: name, 
+        success: true, 
+        branch: currentBranch,
+        prUrl: prUrl.trim()
+      });
+      
+      log(`${name}: ${colors.green}✓ PR created${colors.reset}`, 'reset', true);
+      log(`  ${colors.blue}${prUrl.trim()}${colors.reset}`, 'reset', true);
+      
+    } catch (error) {
+      results.push({ 
+        service: name, 
+        success: false, 
+        error: error.message 
+      });
+      log(`${name}: ${colors.red}✗ ${error.message}${colors.reset}`, 'reset', true);
+    }
+  }
+  
+  // Summary
+  log('\n' + '='.repeat(50), 'reset', true);
+  
+  const successful = results.filter(r => r.success);
+  const failed = results.filter(r => !r.success);
+  
+  if (successful.length > 0) {
+    log(`${colors.green}Successfully created ${successful.length} PR(s)${colors.reset}`, 'reset', true);
+    successful.forEach(r => {
+      log(`  ${r.service}: ${colors.blue}${r.prUrl}${colors.reset}`, 'reset', true);
+    });
+  }
+  
+  if (failed.length > 0) {
+    log(`\n${colors.red}Failed to create ${failed.length} PR(s)${colors.reset}`, 'reset', true);
+    failed.forEach(r => {
+      log(`  ${r.service}: ${r.error}`, 'reset', true);
+    });
+  }
+}
+
 async function createBranch(ticketNumber, serviceName = null) {
   if (!checkRoot()) {
     log('Error: This script must be run as root (use sudo)', 'red');
@@ -727,6 +1181,73 @@ async function main() {
       await showRepositoryStatus(statusService);
       break;
       
+    case 'sync':
+    case 'pull':
+      const syncService = args[1];
+      await syncRepositories(syncService);
+      break;
+      
+    case 'search':
+      if (args.length < 2) {
+        log('Error: Please specify a search pattern', 'red', true);
+        log('Usage: repo-manager.js search <pattern> [service] [--include=pattern]', 'reset', true);
+        process.exit(1);
+      }
+      const searchPattern = args[1];
+      const searchService = args[2] && !args[2].startsWith('--') ? args[2] : undefined;
+      const includeArg = args.find(arg => arg.startsWith('--include='));
+      const includePattern = includeArg ? includeArg.split('=')[1] : undefined;
+      await searchInRepositories(searchPattern, { 
+        service: searchService, 
+        include: includePattern 
+      });
+      break;
+      
+    case 'recent':
+    case 'activity':
+      const recentService = args[1] && !args[1].startsWith('--') ? args[1] : undefined;
+      const daysArg = args.find(arg => arg.startsWith('--days='));
+      const countArg = args.find(arg => arg.startsWith('--count='));
+      const days = daysArg ? parseInt(daysArg.split('=')[1]) : 7;
+      const count = countArg ? parseInt(countArg.split('=')[1]) : 5;
+      await showRecentActivity({ 
+        service: recentService,
+        days,
+        count
+      });
+      break;
+      
+    case 'stash':
+      const stashAction = args[1] || 'list';
+      if (!['save', 'pop', 'list'].includes(stashAction)) {
+        log('Error: Invalid stash action', 'red', true);
+        log('Usage: repo-manager.js stash [save|pop|list] ["message"]', 'reset', true);
+        process.exit(1);
+      }
+      const stashMessage = stashAction === 'save' && args[2] ? args.slice(2).join(' ') : '';
+      await manageStash(stashAction, stashMessage);
+      break;
+      
+    case 'pr':
+      const prTitle = args.find(arg => arg.startsWith('--title='));
+      const prBody = args.find(arg => arg.startsWith('--body='));
+      const prDraft = args.includes('--draft');
+      const prService = args[1] && !args[1].startsWith('--') ? args[1] : undefined;
+      
+      if (!prTitle) {
+        log('Error: PR title is required', 'red', true);
+        log('Usage: repo-manager.js pr [service] --title="PR title" [--body="description"] [--draft]', 'reset', true);
+        process.exit(1);
+      }
+      
+      await createPullRequest({
+        title: prTitle.split('=').slice(1).join('='),
+        body: prBody ? prBody.split('=').slice(1).join('=') : undefined,
+        draft: prDraft,
+        service: prService
+      });
+      break;
+      
     case 'help':
     case '--help':
     case '-h':
@@ -738,6 +1259,11 @@ Usage:
   node repo-manager.js list                  # List current branches
   node repo-manager.js branches [service]    # List available branches
   node repo-manager.js status [service]       # Show repository status
+  node repo-manager.js sync [service]         # Pull latest changes on current branches
+  node repo-manager.js search <pattern> [service] [--include=glob]  # Search across repos
+  node repo-manager.js recent [service] [--days=N] [--count=N]  # Show recent commits
+  node repo-manager.js stash [save|pop|list] ["message"]  # Manage stashes
+  node repo-manager.js pr [service] --title="title" [options]  # Create PR
   node repo-manager.js update <branch> [service] [options]  # Update to branch
   node repo-manager.js create <ticket> [service]  # Create REN-<ticket> branch from dev
 
@@ -759,6 +1285,15 @@ Examples:
   sudo node repo-manager.js create 1234 frontend  # Create REN-1234 only for frontend
   node repo-manager.js status                # Show status of all repos
   node repo-manager.js status frontend       # Show status of specific repo
+  node repo-manager.js sync                  # Pull latest for all repos
+  node repo-manager.js sync frontend         # Pull latest for specific repo
+  node repo-manager.js search "TODO"         # Find TODOs in all repos
+  node repo-manager.js search "getUserData" frontend --include="*.js"
+  node repo-manager.js recent --days=7       # Commits from last 7 days
+  node repo-manager.js stash save "work in progress"  # Save stash
+  node repo-manager.js stash pop            # Restore stash
+  node repo-manager.js pr --title="Fix auth bug" --body="Fixed issue with..."
+  node repo-manager.js pr frontend --title="Update UI" --draft
 
 Services:
   ${Object.keys(services).join(', ')}
