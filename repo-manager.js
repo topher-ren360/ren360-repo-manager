@@ -5,6 +5,18 @@ const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
 
+// Import AI Agent if available
+let AIAgent, loadApiKey, getModel, getMaxTokens;
+try {
+  const aiModule = require('./lib/ai-agent');
+  AIAgent = aiModule.AIAgent;
+  loadApiKey = aiModule.loadApiKey;
+  getModel = aiModule.getModel;
+  getMaxTokens = aiModule.getMaxTokens;
+} catch (error) {
+  // AI module not available
+}
+
 // Color codes for console output
 const colors = {
   reset: '\x1b[0m',
@@ -1033,18 +1045,65 @@ async function reviewPullRequests(ticketNumber, options = {}) {
     log(`\n${colors.cyan}=== AI Analysis ===${colors.reset}`, 'reset', true);
     
     try {
-      // Collect all PR information for analysis
-      const prSummary = allPRs.map(pr => ({
-        service: pr.service,
-        title: pr.title,
-        files: pr.filesChanged,
-        additions: pr.additions,
-        deletions: pr.deletions,
-        description: pr.body || 'No description'
-      }));
+      // Check if AI is configured
+      const apiKey = loadApiKey && loadApiKey();
       
-      // Create analysis prompt
-      const analysisPrompt = `Analyze these pull requests for ticket ${searchPattern}:
+      if (apiKey && AIAgent) {
+        log('Running automated AI analysis...', 'yellow', true);
+        
+        // Collect all PR information for analysis
+        const prSummary = allPRs.map(pr => ({
+          service: pr.service,
+          title: pr.title,
+          files: pr.filesChanged,
+          additions: pr.additions,
+          deletions: pr.deletions,
+          description: pr.body || 'No description',
+          state: pr.state,
+          author: pr.author.login
+        }));
+        
+        // Initialize AI agent
+        const agent = new AIAgent(apiKey, getModel(), getMaxTokens());
+        
+        // Get AI analysis
+        const analysis = await agent.analyzePullRequests(prSummary, ticketNumber);
+        
+        log('\n' + '='.repeat(60), 'reset', true);
+        log(`\n${colors.green}AI Analysis Complete:${colors.reset}`, 'reset', true);
+        log('\n' + analysis, 'reset', true);
+        
+        // Save analysis to file
+        const analysisFile = `/tmp/pr-ai-analysis-${ticketNumber}.md`;
+        fs.writeFileSync(analysisFile, `# AI Analysis for ${searchPattern}\n\n${analysis}`);
+        log(`\n${colors.blue}Analysis saved to: ${analysisFile}${colors.reset}`, 'reset', true);
+        
+        // Offer additional analysis options
+        if (openPRs.length > 0) {
+          log(`\n${colors.cyan}Additional AI Analysis Options:${colors.reset}`, 'reset', true);
+          log('  --security   : Deep security audit', 'reset', true);
+          log('  --tests      : Generate test suggestions', 'reset', true);
+          log('  --diff       : Analyze specific code diffs', 'reset', true);
+        }
+        
+      } else {
+        // No API key configured, fall back to manual process
+        log('\nAI Agent not configured. To enable automated analysis:', 'yellow', true);
+        log('1. Copy .env.example to .env', 'reset', true);
+        log('2. Add your Anthropic API key', 'reset', true);
+        log('3. Run the review command again with --analyze', 'reset', true);
+        
+        // Still save the prompt for manual use
+        const prSummary = allPRs.map(pr => ({
+          service: pr.service,
+          title: pr.title,
+          files: pr.filesChanged,
+          additions: pr.additions,
+          deletions: pr.deletions,
+          description: pr.body || 'No description'
+        }));
+        
+        const analysisPrompt = `Analyze these pull requests for ticket ${searchPattern}:
 
 ${JSON.stringify(prSummary, null, 2)}
 
@@ -1055,16 +1114,16 @@ Please provide:
 4. Suggestions for testing
 5. Any architectural or design considerations`;
 
-      // Save analysis request to a file for the AI to process
-      const analysisFile = `/tmp/pr-analysis-${ticketNumber}.txt`;
-      fs.writeFileSync(analysisFile, analysisPrompt);
-      
-      log(`\nAI analysis prompt saved to: ${analysisFile}`, 'blue', true);
-      log(`To get AI analysis, run:`, 'reset', true);
-      log(`  cat ${analysisFile} | <your-ai-tool>`, 'reset', true);
+        const analysisFile = `/tmp/pr-analysis-${ticketNumber}.txt`;
+        fs.writeFileSync(analysisFile, analysisPrompt);
+        
+        log(`\nManual analysis prompt saved to: ${analysisFile}`, 'blue', true);
+        log(`To get AI analysis manually:`, 'reset', true);
+        log(`  cat ${analysisFile} | <your-ai-tool>`, 'reset', true);
+      }
       
     } catch (error) {
-      log(`Error preparing AI analysis: ${error.message}`, 'red', true);
+      log(`Error in AI analysis: ${error.message}`, 'red', true);
     }
   }
   
@@ -1168,6 +1227,98 @@ async function createBranch(ticketNumber, serviceName = null) {
   }
   
   return results;
+}
+
+async function setupAIConfiguration() {
+  log('\n=== AI Configuration Setup ===\n', 'cyan', true);
+  
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+  
+  const question = (query) => new Promise((resolve) => rl.question(query, resolve));
+  
+  try {
+    // Check if .env already exists
+    const envPath = path.join(__dirname, '.env');
+    if (fs.existsSync(envPath)) {
+      const overwrite = await question('A .env file already exists. Overwrite? (y/N): ');
+      if (overwrite.toLowerCase() !== 'y') {
+        log('Setup cancelled.', 'yellow', true);
+        rl.close();
+        return;
+      }
+    }
+    
+    log('\nTo use the AI agent, you need an Anthropic API key.', 'reset', true);
+    log('Get your API key from: https://console.anthropic.com/settings/keys', 'blue', true);
+    
+    const apiKey = await question('\nEnter your Anthropic API key: ');
+    
+    if (!apiKey || apiKey.trim().length < 10) {
+      log('Invalid API key. Setup cancelled.', 'red', true);
+      rl.close();
+      return;
+    }
+    
+    // Ask for model preference
+    log('\nAvailable models:', 'reset', true);
+    log('1. claude-3-opus-20240229    (Most capable, higher cost)', 'reset', true);
+    log('2. claude-3-sonnet-20240229  (Balanced performance/cost) [default]', 'reset', true);
+    log('3. claude-3-haiku-20240307   (Fastest, lower cost)', 'reset', true);
+    
+    const modelChoice = await question('\nSelect model (1-3, default: 2): ') || '2';
+    
+    let model = 'claude-3-sonnet-20240229';
+    switch (modelChoice) {
+      case '1':
+        model = 'claude-3-opus-20240229';
+        break;
+      case '3':
+        model = 'claude-3-haiku-20240307';
+        break;
+    }
+    
+    // Create .env file
+    const envContent = `# Anthropic API Configuration
+ANTHROPIC_API_KEY=${apiKey.trim()}
+
+# Model selection
+ANTHROPIC_MODEL=${model}
+
+# Max tokens for responses
+ANTHROPIC_MAX_TOKENS=4096
+`;
+    
+    fs.writeFileSync(envPath, envContent);
+    log('\n✓ Configuration saved to .env', 'green', true);
+    
+    // Test the configuration
+    log('\nTesting AI configuration...', 'yellow', true);
+    
+    try {
+      const testAgent = new AIAgent(apiKey.trim(), model, 1000);
+      const testResponse = await testAgent.sendRequest([
+        { role: 'user', content: 'Say "Configuration successful!" in 5 words or less.' }
+      ]);
+      
+      log('✓ AI Agent configured successfully!', 'green', true);
+      log(`Response: ${testResponse.content[0].text}`, 'reset', true);
+      
+      log('\nYou can now use AI analysis with:', 'reset', true);
+      log('  node repo-manager.js review <ticket-number> --analyze', 'green', true);
+      
+    } catch (error) {
+      log(`✗ Configuration test failed: ${error.message}`, 'red', true);
+      log('Please check your API key and try again.', 'yellow', true);
+    }
+    
+  } catch (error) {
+    log(`Setup error: ${error.message}`, 'red', true);
+  } finally {
+    rl.close();
+  }
 }
 
 async function interactiveMode() {
@@ -1391,6 +1542,10 @@ async function main() {
       await reviewPullRequests(reviewTicket, { analyze: shouldAnalyze });
       break;
       
+    case 'setup-ai':
+      await setupAIConfiguration();
+      break;
+      
     case 'help':
     case '--help':
     case '-h':
@@ -1408,6 +1563,7 @@ Usage:
   node repo-manager.js stash [save|pop|list] ["message"]  # Manage stashes
   node repo-manager.js pr [service] --title="title" [options]  # Create PR
   node repo-manager.js review <ticket-number> [--analyze]  # Review PRs by ticket
+  node repo-manager.js setup-ai                            # Configure AI agent
   node repo-manager.js update <branch> [service] [options]  # Update to branch
   node repo-manager.js create <ticket> [service]  # Create REN-<ticket> branch from dev
 
