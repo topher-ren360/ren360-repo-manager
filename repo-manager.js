@@ -1298,7 +1298,9 @@ ANTHROPIC_MAX_TOKENS=4096
     log('\nTesting AI configuration...', 'yellow', true);
     
     try {
-      const testAgent = new AIAgent(apiKey.trim(), model, 1000);
+      // Re-require the AI module to ensure it's loaded
+      const { AIAgent: TestAIAgent } = require('./lib/ai-agent');
+      const testAgent = new TestAIAgent(apiKey.trim(), model, 1000);
       const testResponse = await testAgent.sendRequest([
         { role: 'user', content: 'Say "Configuration successful!" in 5 words or less.' }
       ]);
