@@ -31,9 +31,14 @@ const services = {
   users: '/var/amarki/repository/microUsers/'
 };
 
+// Global verbose flag
+let VERBOSE = false;
+
 // Utility functions
-function log(message, color = 'reset') {
-  console.log(`${colors[color]}${message}${colors.reset}`);
+function log(message, color = 'reset', forceShow = false) {
+  if (VERBOSE || forceShow) {
+    console.log(`${colors[color]}${message}${colors.reset}`);
+  }
 }
 
 function execCommand(command, options = {}) {
@@ -113,7 +118,11 @@ function updateServiceBranch(serviceName, repoPath, targetBranch, useComposerUpd
       return { service: serviceName, success: false, error: 'Directory not found' };
     }
     
-    log(`\nUpdating ${serviceName} to branch: ${targetBranch}`, 'yellow');
+    if (!VERBOSE) {
+      process.stdout.write(`${colors.yellow}${serviceName}${colors.reset}... `);
+    } else {
+      log(`\nUpdating ${serviceName} to branch: ${targetBranch}`, 'yellow');
+    }
     
     // Get current branch
     const currentBranch = gitCommand(repoPath, 'rev-parse --abbrev-ref HEAD');
@@ -154,12 +163,21 @@ function updateServiceBranch(serviceName, repoPath, targetBranch, useComposerUpd
     
     // Get latest commit
     const latestCommit = gitCommand(repoPath, 'log -1 --pretty=format:"%h - %s (%cr)"');
-    log(`Success: ${serviceName} updated to ${targetBranch}`, 'green');
-    log(`Latest commit: ${latestCommit}`);
+    
+    if (!VERBOSE) {
+      console.log(`${colors.green}✓${colors.reset}`);
+    } else {
+      log(`Success: ${serviceName} updated to ${targetBranch}`, 'green');
+      log(`Latest commit: ${latestCommit}`);
+    }
     
     return { service: serviceName, success: true, branch: targetBranch, commit: latestCommit };
   } catch (error) {
-    log(`Error updating ${serviceName}: ${error.message}`, 'red');
+    if (!VERBOSE) {
+      console.log(`${colors.red}✗${colors.reset}`);
+    } else {
+      log(`Error updating ${serviceName}: ${error.message}`, 'red');
+    }
     return { service: serviceName, success: false, error: error.message };
   }
 }
@@ -207,7 +225,7 @@ function updateDependencies(serviceName, repoPath, useUpdate = false) {
 
 // Command implementations
 async function listCurrentBranches() {
-  log('\n=== Current Branches for All Services ===\n', 'cyan');
+  log('\n=== Current Branches for All Services ===\n', 'cyan', true);
   
   const results = [];
   for (const [name, path] of Object.entries(services)) {
@@ -264,11 +282,11 @@ async function listAvailableBranches(serviceName = null) {
 
 async function updateBranches(targetBranch, serviceName = null, useComposerUpdate = false, skipDeps = false) {
   if (!checkRoot()) {
-    log('Error: This script must be run as root (use sudo)', 'red');
+    log('Error: This script must be run as root (use sudo)', 'red', true);
     process.exit(1);
   }
   
-  log(`\n=== Updating Services to Branch: ${targetBranch} ===\n`, 'cyan');
+  log(`\n=== Updating Services to Branch: ${targetBranch} ===\n`, 'cyan', true);
   
   const servicesToUpdate = serviceName 
     ? { [serviceName]: services[serviceName] }
@@ -284,23 +302,25 @@ async function updateBranches(targetBranch, serviceName = null, useComposerUpdat
   for (const [name, path] of Object.entries(servicesToUpdate)) {
     const result = updateServiceBranch(name, path, targetBranch, useComposerUpdate, skipDeps);
     results.push(result);
-    log('----------------------------------------');
+    if (VERBOSE) {
+      log('----------------------------------------');
+    }
   }
   
   // Summary
-  log('\n=== Update Summary ===\n', 'cyan');
+  log('\n=== Update Summary ===\n', 'cyan', true);
   
   const successful = results.filter(r => r.success);
   const failed = results.filter(r => !r.success);
   
   if (successful.length > 0) {
-    log(`Successfully updated: ${successful.length} service(s)`, 'green');
-    successful.forEach(r => log(`  ✓ ${r.service} -> ${r.branch}`, 'green'));
+    log(`Successfully updated: ${successful.length} service(s)`, 'green', true);
+    successful.forEach(r => log(`  ✓ ${r.service} -> ${r.branch}`, 'green', true));
   }
   
   if (failed.length > 0) {
-    log(`\nFailed to update: ${failed.length} service(s)`, 'red');
-    failed.forEach(r => log(`  ✗ ${r.service}: ${r.error}`, 'red'));
+    log(`\nFailed to update: ${failed.length} service(s)`, 'red', true);
+    failed.forEach(r => log(`  ✗ ${r.service}: ${r.error}`, 'red', true));
   }
   
   // Save log
@@ -501,6 +521,16 @@ async function interactiveMode() {
 async function main() {
   const args = process.argv.slice(2);
   
+  // Check for verbose flag
+  if (args.includes('--verbose') || args.includes('-v')) {
+    VERBOSE = true;
+    // Remove verbose flag from args
+    const index = args.indexOf('--verbose');
+    if (index > -1) args.splice(index, 1);
+    const vIndex = args.indexOf('-v');
+    if (vIndex > -1) args.splice(vIndex, 1);
+  }
+  
   if (args.length === 0) {
     await interactiveMode();
     return;
@@ -521,8 +551,8 @@ async function main() {
       
     case 'update':
       if (args.length < 2) {
-        log('Error: Please specify a branch name', 'red');
-        log('Usage: repo-manager.js update <branch> [service] [--composer-update] [--skip-deps]');
+        log('Error: Please specify a branch name', 'red', true);
+        log('Usage: repo-manager.js update <branch> [service] [--composer-update] [--skip-deps]', 'reset', true);
         process.exit(1);
       }
       const branch = args[1];
@@ -535,8 +565,8 @@ async function main() {
     case 'create':
     case 'create-branch':
       if (args.length < 2) {
-        log('Error: Please specify a ticket number', 'red');
-        log('Usage: repo-manager.js create <ticket-number> [service]');
+        log('Error: Please specify a ticket number', 'red', true);
+        log('Usage: repo-manager.js create <ticket-number> [service]', 'reset', true);
         process.exit(1);
       }
       const ticketNum = args[1];
@@ -557,7 +587,8 @@ Usage:
   node repo-manager.js update <branch> [service] [options]  # Update to branch
   node repo-manager.js create <ticket> [service]  # Create REN-<ticket> branch from dev
 
-Options for update:
+Options:
+  --verbose, -v      # Show detailed output during operations
   --composer-update  # Use composer update instead of install
   --skip-deps        # Skip composer/npm install entirely
 
@@ -569,6 +600,7 @@ Examples:
   sudo node repo-manager.js update master frontend  # Update only frontend
   sudo node repo-manager.js update dev --composer-update  # Update with composer update
   sudo node repo-manager.js update dev --skip-deps  # Update without installing dependencies
+  sudo node repo-manager.js update dev --verbose    # Update with detailed output
   sudo node repo-manager.js create 1234      # Create REN-1234 branch from dev
   sudo node repo-manager.js create 1234 frontend  # Create REN-1234 only for frontend
 
