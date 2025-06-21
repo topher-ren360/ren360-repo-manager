@@ -1,0 +1,27 @@
+# REN360 Service Branch Configuration
+# Format: service=branch
+# Lines starting with # are comments
+
+# Core services
+users=master
+frontend=develop
+emails=master
+
+# AI/Intelligence service
+intelligence=feature/ai-improvements
+
+# Social and integrations
+social=master
+integrations=develop
+
+# Ads services
+ads=feature/facebook-api-v18
+
+# Other services will use the default branch if not specified here
+# templates=master
+# images=master
+# contacts=master
+# payments=master
+# products=master
+# sms=master
+# storage=master

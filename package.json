@@ -1,0 +1,28 @@
+{
+  "name": "ren360-repo-manager",
+  "version": "1.0.0",
+  "description": "Repository management tool for REN360 microservices",
+  "main": "repo-manager.js",
+  "bin": {
+    "repo-manager": "./repo-manager.js"
+  },
+  "scripts": {
+    "start": "node repo-manager.js",
+    "list": "node repo-manager.js list",
+    "branches": "node repo-manager.js branches",
+    "help": "node repo-manager.js help"
+  },
+  "keywords": [
+    "ren360",
+    "git",
+    "repository",
+    "management",
+    "microservices"
+  ],
+  "author": "REN360",
+  "license": "MIT",
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "dependencies": {}
+}
