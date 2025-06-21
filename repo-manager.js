@@ -179,7 +179,7 @@ function updateDependencies(serviceName, repoPath) {
         execCommand('sudo -u www-data /usr/bin/php8.2 /usr/local/bin/composer26 install --no-interaction', { cwd: repoPath });
       } else {
         // Use PHP 8.1 for ads, emails, integrations, sms, social, templates
-        execCommand('sudo -u www-data /usr/bin/php8.1 composer install --no-interaction', { cwd: repoPath });
+        execCommand('sudo -u www-data /usr/bin/php8.1 /usr/local/bin/composer install --no-interaction', { cwd: repoPath });
       }
     }
     
