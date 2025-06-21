@@ -242,9 +242,9 @@ async function listCurrentBranches() {
     const branch = result.branch.padEnd(maxBranchLength);
     
     if (result.error) {
-      log(`${service} | ${branch} | ${colors.red}${result.error}${colors.reset}`);
+      log(`${service} | ${branch} | ${colors.red}${result.error}${colors.reset}`, 'reset', true);
     } else {
-      log(`${service} | ${colors.green}${branch}${colors.reset}`);
+      log(`${service} | ${colors.green}${branch}${colors.reset}`, 'reset', true);
     }
   });
   
@@ -252,29 +252,29 @@ async function listCurrentBranches() {
 }
 
 async function listAvailableBranches(serviceName = null) {
-  log('\n=== Available Branches ===\n', 'cyan');
+  log('\n=== Available Branches ===\n', 'cyan', true);
   
   const servicesToCheck = serviceName 
     ? { [serviceName]: services[serviceName] }
     : services;
   
   if (serviceName && !services[serviceName]) {
-    log(`Error: Service '${serviceName}' not found`, 'red');
+    log(`Error: Service '${serviceName}' not found`, 'red', true);
     return;
   }
   
   for (const [name, path] of Object.entries(servicesToCheck)) {
     const result = getAllBranches(name, path);
     
-    log(`\n${colors.yellow}${name}:${colors.reset}`);
+    log(`\n${colors.yellow}${name}:${colors.reset}`, 'reset', true);
     
     if (result.error) {
-      log(`  Error: ${result.error}`, 'red');
+      log(`  Error: ${result.error}`, 'red', true);
     } else if (result.branches.length === 0) {
-      log('  No branches found', 'yellow');
+      log('  No branches found', 'yellow', true);
     } else {
       result.branches.forEach(branch => {
-        log(`  - ${branch}`);
+        log(`  - ${branch}`, 'reset', true);
       });
     }
   }
