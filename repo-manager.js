@@ -945,6 +945,138 @@ async function createPullRequest(options = {}) {
   }
 }
 
+async function reviewPullRequests(ticketNumber, options = {}) {
+  const { analyze = false } = options;
+  const searchPattern = `REN-${ticketNumber}`;
+  
+  log(`\n=== Searching for PRs: ${searchPattern} ===\n`, 'cyan', true);
+  
+  const allPRs = [];
+  let totalFiles = 0;
+  let totalAdditions = 0;
+  let totalDeletions = 0;
+  
+  for (const [name, path] of Object.entries(services)) {
+    try {
+      if (!fs.existsSync(path)) {
+        continue;
+      }
+      
+      // Use GitHub CLI to find PRs with the ticket number
+      const prListCommand = `gh pr list --search "${searchPattern}" --state all --json number,title,state,url,isDraft,createdAt,author,headRefName`;
+      const prsJson = execCommand(prListCommand, { cwd: path });
+      
+      if (prsJson && prsJson.trim() !== '[]') {
+        const prs = JSON.parse(prsJson);
+        
+        for (const pr of prs) {
+          // Get PR details including files changed
+          const prDetailsCommand = `gh pr view ${pr.number} --json files,additions,deletions,body,reviews,comments`;
+          const prDetails = JSON.parse(execCommand(prDetailsCommand, { cwd: path }));
+          
+          const prInfo = {
+            service: name,
+            ...pr,
+            ...prDetails,
+            filesChanged: prDetails.files ? prDetails.files.length : 0
+          };
+          
+          allPRs.push(prInfo);
+          totalFiles += prInfo.filesChanged;
+          totalAdditions += prDetails.additions || 0;
+          totalDeletions += prDetails.deletions || 0;
+          
+          // Display PR info
+          log(`\n${colors.yellow}${name}:${colors.reset}`, 'reset', true);
+          log(`  PR #${pr.number}: ${pr.title}`, 'reset', true);
+          log(`  ${colors.blue}${pr.url}${colors.reset}`, 'reset', true);
+          log(`  Status: ${pr.state === 'OPEN' ? colors.green : colors.red}${pr.state}${colors.reset}${pr.isDraft ? ' (Draft)' : ''}`, 'reset', true);
+          log(`  Author: ${pr.author.login} | Created: ${new Date(pr.createdAt).toLocaleDateString()}`, 'reset', true);
+          log(`  Changes: +${prDetails.additions || 0} -${prDetails.deletions || 0} in ${prInfo.filesChanged} files`, 'reset', true);
+          
+          if (prDetails.reviews && prDetails.reviews.length > 0) {
+            const approvals = prDetails.reviews.filter(r => r.state === 'APPROVED').length;
+            const changes = prDetails.reviews.filter(r => r.state === 'CHANGES_REQUESTED').length;
+            log(`  Reviews: ${colors.green}${approvals} approved${colors.reset}, ${colors.red}${changes} changes requested${colors.reset}`, 'reset', true);
+          }
+        }
+      }
+    } catch (error) {
+      // No PRs found or error
+    }
+  }
+  
+  // Summary
+  log('\n' + '='.repeat(60), 'reset', true);
+  
+  if (allPRs.length === 0) {
+    log(`No PRs found for ticket ${searchPattern}`, 'yellow', true);
+    return;
+  }
+  
+  log(`\n${colors.cyan}=== Summary for ${searchPattern} ===${colors.reset}`, 'reset', true);
+  log(`Total PRs: ${colors.green}${allPRs.length}${colors.reset} across ${new Set(allPRs.map(pr => pr.service)).size} services`, 'reset', true);
+  log(`Total changes: ${colors.green}+${totalAdditions}${colors.reset} ${colors.red}-${totalDeletions}${colors.reset} in ${totalFiles} files`, 'reset', true);
+  
+  // Group by status
+  const openPRs = allPRs.filter(pr => pr.state === 'OPEN');
+  const mergedPRs = allPRs.filter(pr => pr.state === 'MERGED');
+  const closedPRs = allPRs.filter(pr => pr.state === 'CLOSED' && pr.state !== 'MERGED');
+  
+  log(`\nStatus breakdown:`, 'reset', true);
+  if (openPRs.length > 0) log(`  ${colors.green}Open: ${openPRs.length}${colors.reset}`, 'reset', true);
+  if (mergedPRs.length > 0) log(`  ${colors.blue}Merged: ${mergedPRs.length}${colors.reset}`, 'reset', true);
+  if (closedPRs.length > 0) log(`  ${colors.red}Closed: ${closedPRs.length}${colors.reset}`, 'reset', true);
+  
+  // AI Analysis
+  if (analyze && allPRs.length > 0) {
+    log(`\n${colors.cyan}=== AI Analysis ===${colors.reset}`, 'reset', true);
+    
+    try {
+      // Collect all PR information for analysis
+      const prSummary = allPRs.map(pr => ({
+        service: pr.service,
+        title: pr.title,
+        files: pr.filesChanged,
+        additions: pr.additions,
+        deletions: pr.deletions,
+        description: pr.body || 'No description'
+      }));
+      
+      // Create analysis prompt
+      const analysisPrompt = `Analyze these pull requests for ticket ${searchPattern}:
+
+${JSON.stringify(prSummary, null, 2)}
+
+Please provide:
+1. Overall assessment of the changes
+2. Potential risks or concerns
+3. Key areas that need careful review
+4. Suggestions for testing
+5. Any architectural or design considerations`;
+
+      // Save analysis request to a file for the AI to process
+      const analysisFile = `/tmp/pr-analysis-${ticketNumber}.txt`;
+      fs.writeFileSync(analysisFile, analysisPrompt);
+      
+      log(`\nAI analysis prompt saved to: ${analysisFile}`, 'blue', true);
+      log(`To get AI analysis, run:`, 'reset', true);
+      log(`  cat ${analysisFile} | <your-ai-tool>`, 'reset', true);
+      
+    } catch (error) {
+      log(`Error preparing AI analysis: ${error.message}`, 'red', true);
+    }
+  }
+  
+  // Quick links
+  log(`\n${colors.cyan}=== Quick Actions ===${colors.reset}`, 'reset', true);
+  openPRs.forEach(pr => {
+    log(`\nReview ${pr.service} PR:`, 'reset', true);
+    log(`  gh pr review ${pr.number} --repo ${pr.url.split('/').slice(3, 5).join('/')}`, 'reset', true);
+    log(`  gh pr checkout ${pr.number} --repo ${pr.url.split('/').slice(3, 5).join('/')}`, 'reset', true);
+  });
+}
+
 async function createBranch(ticketNumber, serviceName = null) {
   if (!checkRoot()) {
     log('Error: This script must be run as root (use sudo)', 'red');
@@ -1248,6 +1380,17 @@ async function main() {
       });
       break;
       
+    case 'review':
+      if (args.length < 2) {
+        log('Error: Please specify a ticket number', 'red', true);
+        log('Usage: repo-manager.js review <ticket-number> [--analyze]', 'reset', true);
+        process.exit(1);
+      }
+      const reviewTicket = args[1];
+      const shouldAnalyze = args.includes('--analyze');
+      await reviewPullRequests(reviewTicket, { analyze: shouldAnalyze });
+      break;
+      
     case 'help':
     case '--help':
     case '-h':
@@ -1264,6 +1407,7 @@ Usage:
   node repo-manager.js recent [service] [--days=N] [--count=N]  # Show recent commits
   node repo-manager.js stash [save|pop|list] ["message"]  # Manage stashes
   node repo-manager.js pr [service] --title="title" [options]  # Create PR
+  node repo-manager.js review <ticket-number> [--analyze]  # Review PRs by ticket
   node repo-manager.js update <branch> [service] [options]  # Update to branch
   node repo-manager.js create <ticket> [service]  # Create REN-<ticket> branch from dev
 
@@ -1294,6 +1438,8 @@ Examples:
   node repo-manager.js stash pop            # Restore stash
   node repo-manager.js pr --title="Fix auth bug" --body="Fixed issue with..."
   node repo-manager.js pr frontend --title="Update UI" --draft
+  node repo-manager.js review 1234           # Find all PRs for REN-1234
+  node repo-manager.js review 1234 --analyze # With AI analysis prompt
 
 Services:
   ${Object.keys(services).join(', ')}
