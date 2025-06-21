@@ -107,7 +107,7 @@ function getAllBranches(serviceName, repoPath) {
   }
 }
 
-function updateServiceBranch(serviceName, repoPath, targetBranch) {
+function updateServiceBranch(serviceName, repoPath, targetBranch, useComposerUpdate = false) {
   try {
     if (!fs.existsSync(repoPath)) {
       return { service: serviceName, success: false, error: 'Directory not found' };
@@ -146,7 +146,7 @@ function updateServiceBranch(serviceName, repoPath, targetBranch) {
     gitCommand(repoPath, 'pull');
     
     // Update dependencies
-    updateDependencies(serviceName, repoPath);
+    updateDependencies(serviceName, repoPath, useComposerUpdate);
     
     // Get latest commit
     const latestCommit = gitCommand(repoPath, 'log -1 --pretty=format:"%h - %s (%cr)"');
@@ -160,26 +160,29 @@ function updateServiceBranch(serviceName, repoPath, targetBranch) {
   }
 }
 
-function updateDependencies(serviceName, repoPath) {
+function updateDependencies(serviceName, repoPath, useUpdate = false) {
   try {
     // Check for composer.json
     if (fs.existsSync(path.join(repoPath, 'composer.json'))) {
-      log('Running composer install...');
+      const command = useUpdate ? 'update' : 'install';
+      log(`Running composer ${command}...`);
       
-      // Services that use PHP 7.4
+      // Services that use PHP 7.4 with default composer (based on users.sh)
       const php74Services = ['users', 'images'];
       
-      // Services that use PHP 8.2 with Composer 2.6
-      const php82Services = ['frontend', 'intelligence'];
+      // Services that use PHP 8.2 with Composer 2.6 (based on frontend.sh)
+      const php82Services = ['frontend'];
       
-      // All other services use PHP 8.1
+      // All other services use PHP 8.1 with Composer 2.6 (based on ads.sh pattern)
       if (php74Services.includes(serviceName)) {
-        execCommand('sudo -u www-data composer install --no-interaction', { cwd: repoPath });
+        // users.sh just uses 'composer install' without full path
+        execCommand(`sudo -u www-data composer ${command} --no-interaction`, { cwd: repoPath });
       } else if (php82Services.includes(serviceName)) {
-        execCommand('sudo -u www-data /usr/bin/php8.2 /usr/local/bin/composer26 install --no-interaction', { cwd: repoPath });
+        // frontend.sh uses full paths: /usr/bin/php8.2 /usr/local/bin/composer26
+        execCommand(`sudo -u www-data /usr/bin/php8.2 /usr/local/bin/composer26 ${command} --no-interaction`, { cwd: repoPath });
       } else {
-        // Use PHP 8.1 for ads, emails, integrations, sms, social, templates
-        execCommand('sudo -u www-data /usr/bin/php8.1 /usr/local/bin/composer install --no-interaction', { cwd: repoPath });
+        // ads.sh pattern: /usr/bin/php8.1 /usr/local/bin/composer26
+        execCommand(`sudo -u www-data /usr/bin/php8.1 /usr/local/bin/composer26 ${command} --no-interaction`, { cwd: repoPath });
       }
     }
     
@@ -250,7 +253,7 @@ async function listAvailableBranches(serviceName = null) {
   }
 }
 
-async function updateBranches(targetBranch, serviceName = null) {
+async function updateBranches(targetBranch, serviceName = null, useComposerUpdate = false) {
   if (!checkRoot()) {
     log('Error: This script must be run as root (use sudo)', 'red');
     process.exit(1);
@@ -270,7 +273,7 @@ async function updateBranches(targetBranch, serviceName = null) {
   const results = [];
   
   for (const [name, path] of Object.entries(servicesToUpdate)) {
-    const result = updateServiceBranch(name, path, targetBranch);
+    const result = updateServiceBranch(name, path, targetBranch, useComposerUpdate);
     results.push(result);
     log('----------------------------------------');
   }
@@ -406,12 +409,13 @@ async function main() {
     case 'update':
       if (args.length < 2) {
         log('Error: Please specify a branch name', 'red');
-        log('Usage: repo-manager.js update <branch> [service]');
+        log('Usage: repo-manager.js update <branch> [service] [--composer-update]');
         process.exit(1);
       }
       const branch = args[1];
-      const targetService = args[2];
-      await updateBranches(branch, targetService);
+      const targetService = args[2] && !args[2].startsWith('--') ? args[2] : undefined;
+      const useComposerUpdate = args.includes('--composer-update');
+      await updateBranches(branch, targetService, useComposerUpdate);
       break;
       
     case 'help':
@@ -424,7 +428,7 @@ Usage:
   node repo-manager.js                       # Interactive mode
   node repo-manager.js list                  # List current branches
   node repo-manager.js branches [service]    # List available branches
-  node repo-manager.js update <branch> [service]  # Update to branch
+  node repo-manager.js update <branch> [service] [--composer-update]  # Update to branch
 
 Examples:
   node repo-manager.js list
@@ -432,6 +436,7 @@ Examples:
   node repo-manager.js branches              # All services
   sudo node repo-manager.js update develop   # Update all to develop
   sudo node repo-manager.js update master frontend  # Update only frontend
+  sudo node repo-manager.js update dev --composer-update  # Update with composer update
 
 Services:
   ${Object.keys(services).join(', ')}
