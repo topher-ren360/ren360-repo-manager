@@ -1136,6 +1136,114 @@ Please provide:
   });
 }
 
+async function listAllPullRequests(options = {}) {
+  const { state = 'open' } = options;
+  
+  log(`\n=== Listing ${state === 'all' ? 'All' : state.charAt(0).toUpperCase() + state.slice(1)} Pull Requests ===\n`, 'cyan', true);
+  
+  const allPRs = [];
+  const prsByTicket = {};
+  
+  for (const [name, path] of Object.entries(services)) {
+    try {
+      if (!fs.existsSync(path)) {
+        continue;
+      }
+      
+      // List PRs for this service
+      const prListCommand = `gh pr list --state ${state} --json number,title,state,url,isDraft,createdAt,author,headRefName --limit 50`;
+      const prsJson = execCommand(prListCommand, { cwd: path });
+      
+      if (prsJson && prsJson.trim() !== '[]') {
+        const prs = JSON.parse(prsJson);
+        
+        for (const pr of prs) {
+          const prInfo = {
+            service: name,
+            ...pr
+          };
+          
+          allPRs.push(prInfo);
+          
+          // Extract ticket number if present
+          const ticketMatch = pr.title.match(/REN-(\d+)/i) || pr.headRefName.match(/REN-(\d+)/i);
+          if (ticketMatch) {
+            const ticket = ticketMatch[0].toUpperCase();
+            if (!prsByTicket[ticket]) {
+              prsByTicket[ticket] = [];
+            }
+            prsByTicket[ticket].push(prInfo);
+          }
+        }
+      }
+    } catch (error) {
+      // Service might not have gh configured
+    }
+  }
+  
+  if (allPRs.length === 0) {
+    log(`No ${state} PRs found across any services.`, 'yellow', true);
+    return;
+  }
+  
+  // Sort by creation date
+  allPRs.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  
+  // Display PRs grouped by ticket
+  log(`${colors.green}Found ${allPRs.length} PR(s)${colors.reset}`, 'reset', true);
+  
+  // First show PRs with ticket numbers
+  if (Object.keys(prsByTicket).length > 0) {
+    log(`\n${colors.cyan}=== PRs by Ticket ===${colors.reset}`, 'reset', true);
+    
+    for (const [ticket, prs] of Object.entries(prsByTicket)) {
+      log(`\n${colors.yellow}${ticket}:${colors.reset} (${prs.length} PR${prs.length > 1 ? 's' : ''})`, 'reset', true);
+      
+      for (const pr of prs) {
+        const statusColor = pr.state === 'OPEN' ? 'green' : 'red';
+        const draftText = pr.isDraft ? ' [DRAFT]' : '';
+        log(`  ${colors.blue}${pr.service}${colors.reset}: ${pr.title}${draftText}`, 'reset', true);
+        log(`    ${colors[statusColor]}#${pr.number}${colors.reset} by ${pr.author.login} - ${new Date(pr.createdAt).toLocaleDateString()}`, 'reset', true);
+        log(`    ${pr.url}`, 'reset', true);
+      }
+    }
+  }
+  
+  // Then show PRs without ticket numbers
+  const prsWithoutTickets = allPRs.filter(pr => {
+    const hasTicket = pr.title.match(/REN-\d+/i) || pr.headRefName.match(/REN-\d+/i);
+    return !hasTicket;
+  });
+  
+  if (prsWithoutTickets.length > 0) {
+    log(`\n${colors.cyan}=== Other PRs ===${colors.reset}`, 'reset', true);
+    
+    for (const pr of prsWithoutTickets) {
+      const statusColor = pr.state === 'OPEN' ? 'green' : 'red';
+      const draftText = pr.isDraft ? ' [DRAFT]' : '';
+      log(`\n${colors.blue}${pr.service}${colors.reset}: ${pr.title}${draftText}`, 'reset', true);
+      log(`  ${colors[statusColor]}#${pr.number}${colors.reset} by ${pr.author.login} - ${new Date(pr.createdAt).toLocaleDateString()}`, 'reset', true);
+      log(`  ${pr.url}`, 'reset', true);
+    }
+  }
+  
+  // Show quick review commands
+  log(`\n${colors.cyan}=== Quick Review Commands ===${colors.reset}`, 'reset', true);
+  
+  // Group tickets that have multiple PRs
+  const multiServiceTickets = Object.entries(prsByTicket).filter(([_, prs]) => prs.length > 1);
+  
+  if (multiServiceTickets.length > 0) {
+    log(`\nMulti-service tickets (use AI review):`, 'reset', true);
+    multiServiceTickets.forEach(([ticket, prs]) => {
+      const ticketNum = ticket.replace('REN-', '');
+      log(`  node repo-manager.js review ${ticketNum} --analyze    # Review all ${prs.length} PRs for ${ticket}`, 'reset', true);
+    });
+  }
+  
+  return { allPRs, prsByTicket };
+}
+
 async function createBranch(ticketNumber, serviceName = null) {
   if (!checkRoot()) {
     log('Error: This script must be run as root (use sudo)', 'red');
@@ -1544,6 +1652,12 @@ async function main() {
       await reviewPullRequests(reviewTicket, { analyze: shouldAnalyze });
       break;
       
+    case 'prs':
+    case 'list-prs':
+      const prState = args.find(arg => arg.startsWith('--state='))?.split('=')[1] || 'open';
+      await listAllPullRequests({ state: prState });
+      break;
+      
     case 'setup-ai':
       await setupAIConfiguration();
       break;
@@ -1564,6 +1678,7 @@ Usage:
   node repo-manager.js recent [service] [--days=N] [--count=N]  # Show recent commits
   node repo-manager.js stash [save|pop|list] ["message"]  # Manage stashes
   node repo-manager.js pr [service] --title="title" [options]  # Create PR
+  node repo-manager.js prs [--state=open|closed|all]       # List all PRs
   node repo-manager.js review <ticket-number> [--analyze]  # Review PRs by ticket
   node repo-manager.js setup-ai                            # Configure AI agent
   node repo-manager.js update <branch> [service] [options]  # Update to branch
@@ -1596,8 +1711,10 @@ Examples:
   node repo-manager.js stash pop            # Restore stash
   node repo-manager.js pr --title="Fix auth bug" --body="Fixed issue with..."
   node repo-manager.js pr frontend --title="Update UI" --draft
+  node repo-manager.js prs                   # List all open PRs
+  node repo-manager.js prs --state=all       # List all PRs (open, closed, merged)
   node repo-manager.js review 1234           # Find all PRs for REN-1234
-  node repo-manager.js review 1234 --analyze # With AI analysis prompt
+  node repo-manager.js review 1234 --analyze # With AI analysis
 
 Services:
   ${Object.keys(services).join(', ')}
