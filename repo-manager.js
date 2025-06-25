@@ -55,44 +55,113 @@ let REPO_ROOT = DEFAULT_REPO_ROOT;
 
 // Check for custom repository root from environment or config file
 function getRepoRoot() {
+  let repoRoot = null;
+  
   // 1. Check environment variable
   if (process.env.REN360_REPO_ROOT) {
-    return process.env.REN360_REPO_ROOT;
+    repoRoot = process.env.REN360_REPO_ROOT;
   }
   
   // 2. Check .ren360rc config file in current directory
-  const localConfig = path.join(process.cwd(), '.ren360rc');
-  if (fs.existsSync(localConfig)) {
-    try {
-      const config = JSON.parse(fs.readFileSync(localConfig, 'utf8'));
-      if (config.repoRoot) {
-        return config.repoRoot;
+  if (!repoRoot) {
+    const localConfig = path.join(process.cwd(), '.ren360rc');
+    if (fs.existsSync(localConfig)) {
+      try {
+        const config = JSON.parse(fs.readFileSync(localConfig, 'utf8'));
+        if (config.repoRoot) {
+          repoRoot = config.repoRoot;
+        }
+      } catch (error) {
+        console.error(`Error reading ${localConfig}: ${error.message}`);
       }
-    } catch (error) {
-      console.error(`Error reading ${localConfig}: ${error.message}`);
     }
   }
   
   // 3. Check .ren360rc config file in home directory
-  const homeConfig = path.join(require('os').homedir(), '.ren360rc');
-  if (fs.existsSync(homeConfig)) {
-    try {
-      const config = JSON.parse(fs.readFileSync(homeConfig, 'utf8'));
-      if (config.repoRoot) {
-        return config.repoRoot;
+  if (!repoRoot) {
+    const homeConfig = path.join(require('os').homedir(), '.ren360rc');
+    if (fs.existsSync(homeConfig)) {
+      try {
+        const config = JSON.parse(fs.readFileSync(homeConfig, 'utf8'));
+        if (config.repoRoot) {
+          repoRoot = config.repoRoot;
+        }
+      } catch (error) {
+        console.error(`Error reading ${homeConfig}: ${error.message}`);
       }
-    } catch (error) {
-      console.error(`Error reading ${homeConfig}: ${error.message}`);
     }
   }
   
   // 4. Check .env file for REPO_ROOT
-  const repoRootFromEnv = loadEnvVar('REPO_ROOT');
-  if (repoRootFromEnv) {
-    return repoRootFromEnv;
+  if (!repoRoot) {
+    const repoRootFromEnv = loadEnvVar('REPO_ROOT');
+    if (repoRootFromEnv) {
+      repoRoot = repoRootFromEnv;
+    }
   }
   
-  return DEFAULT_REPO_ROOT;
+  // If no repo root found, use default
+  if (!repoRoot) {
+    return DEFAULT_REPO_ROOT;
+  }
+  
+  // Expand tilde to home directory
+  if (repoRoot.startsWith('~')) {
+    repoRoot = path.join(os.homedir(), repoRoot.slice(1));
+  }
+  
+  return repoRoot;
+}
+
+// Get the current environment (development or production)
+function getEnvironment() {
+  // 1. Check command line argument (highest priority)
+  const args = process.argv;
+  const envArgIndex = args.findIndex(arg => arg.startsWith('--env='));
+  if (envArgIndex !== -1) {
+    return args[envArgIndex].split('=')[1].toLowerCase();
+  }
+  
+  // 2. Check environment variable
+  const envVar = process.env.REN360_ENVIRONMENT;
+  if (envVar) {
+    return envVar.toLowerCase();
+  }
+  
+  // 3. Check .ren360rc config files
+  // Check local directory first
+  if (fs.existsSync('.ren360rc')) {
+    try {
+      const config = JSON.parse(fs.readFileSync('.ren360rc', 'utf8'));
+      if (config.environment) {
+        return config.environment.toLowerCase();
+      }
+    } catch {}
+  }
+  
+  // Check home directory
+  const homeConfig = path.join(os.homedir(), '.ren360rc');
+  if (fs.existsSync(homeConfig)) {
+    try {
+      const config = JSON.parse(fs.readFileSync(homeConfig, 'utf8'));
+      if (config.environment) {
+        return config.environment.toLowerCase();
+      }
+    } catch {}
+  }
+  
+  // 4. Check .env file
+  const envFromFile = loadEnvVar('ENVIRONMENT');
+  if (envFromFile) {
+    return envFromFile.toLowerCase();
+  }
+  
+  // 5. Auto-detect based on platform and paths
+  if (process.platform === 'linux' && fs.existsSync('/var/amarki/repository')) {
+    return 'production';
+  }
+  
+  return 'development';
 }
 
 // Service definitions (will be populated based on REPO_ROOT)
@@ -141,7 +210,11 @@ function checkRoot() {
 }
 
 function gitCommand(repoPath, command) {
-  return execCommand(`sudo -u www-data git ${command}`, { cwd: repoPath });
+  // On development environments, run git directly without sudo
+  // On production servers, use sudo -u www-data for proper permissions
+  const environment = getEnvironment();
+  const gitCmd = environment === 'production' ? `sudo -u www-data git ${command}` : `git ${command}`;
+  return execCommand(gitCmd, { cwd: repoPath });
 }
 
 // Core functions
@@ -266,39 +339,42 @@ function updateServiceBranch(serviceName, repoPath, targetBranch, useComposerUpd
 
 function updateDependencies(serviceName, repoPath, useUpdate = false) {
   try {
+    const environment = getEnvironment();
+    
     // Check for composer.json
     if (fs.existsSync(path.join(repoPath, 'composer.json'))) {
       const command = useUpdate ? 'update' : 'install';
       log(`Running composer ${command}...`);
       
-      // Services that use default composer (based on shell scripts)
-      const defaultComposerServices = ['users', 'images'];
-      
-      // Services that use PHP 8.2 with Composer 2.6 (based on shell scripts)
-      const php82Services = ['emails', 'frontend', 'integrations', 'sms', 'templates'];
-      
-      // Services that use PHP 8.1 with Composer 2.6 (based on shell scripts)
-      const php81Services = ['ads', 'social'];
-      
-      if (defaultComposerServices.includes(serviceName)) {
-        // users.sh and images.sh just use 'composer install' without full path
-        execCommand(`sudo -u www-data composer ${command} --no-interaction`, { cwd: repoPath });
-      } else if (php82Services.includes(serviceName)) {
-        // Uses full paths: /usr/bin/php8.2 /usr/local/bin/composer26
-        execCommand(`sudo -u www-data /usr/bin/php8.2 /usr/local/bin/composer26 ${command} --no-interaction`, { cwd: repoPath });
-      } else if (php81Services.includes(serviceName)) {
-        // Uses full paths: /usr/bin/php8.1 /usr/local/bin/composer26
-        execCommand(`sudo -u www-data /usr/bin/php8.1 /usr/local/bin/composer26 ${command} --no-interaction`, { cwd: repoPath });
+      if (environment === 'production') {
+        // Production-specific composer commands with sudo and specific PHP versions
+        const defaultComposerServices = ['users', 'images'];
+        const php82Services = ['emails', 'frontend', 'integrations', 'sms', 'templates'];
+        const php81Services = ['ads', 'social'];
+        
+        if (defaultComposerServices.includes(serviceName)) {
+          execCommand(`sudo -u www-data composer ${command} --no-interaction`, { cwd: repoPath });
+        } else if (php82Services.includes(serviceName)) {
+          execCommand(`sudo -u www-data /usr/bin/php8.2 /usr/local/bin/composer26 ${command} --no-interaction`, { cwd: repoPath });
+        } else if (php81Services.includes(serviceName)) {
+          execCommand(`sudo -u www-data /usr/bin/php8.1 /usr/local/bin/composer26 ${command} --no-interaction`, { cwd: repoPath });
+        } else {
+          execCommand(`sudo -u www-data composer ${command} --no-interaction`, { cwd: repoPath });
+        }
       } else {
-        // Default fallback
-        execCommand(`sudo -u www-data composer ${command} --no-interaction`, { cwd: repoPath });
+        // Development environment - run composer directly
+        execCommand(`composer ${command} --no-interaction`, { cwd: repoPath });
       }
     }
     
     // Check for package.json (mainly for intelligence service)
     if (fs.existsSync(path.join(repoPath, 'package.json')) && serviceName === 'intelligence') {
       log('Running npm install...');
-      execCommand('sudo -u www-data npm install', { cwd: repoPath });
+      if (environment === 'production') {
+        execCommand('sudo -u www-data npm install', { cwd: repoPath });
+      } else {
+        execCommand('npm install', { cwd: repoPath });
+      }
     }
   } catch (error) {
     log(`Warning: Failed to update dependencies: ${error.message}`, 'yellow');
@@ -603,8 +679,10 @@ async function showUncommittedChanges(serviceName = null) {
 }
 
 async function updateBranches(targetBranch, serviceName = null, useComposerUpdate = false, skipDeps = false) {
-  if (!checkRoot()) {
-    log('Error: This script must be run as root (use sudo)', 'red', true);
+  // Only require root on production servers
+  const environment = getEnvironment();
+  if (environment === 'production' && !checkRoot()) {
+    log('Error: This script must be run as root (use sudo) on production servers', 'red', true);
     process.exit(1);
   }
   
@@ -1566,8 +1644,10 @@ async function listAllPullRequests(options = {}) {
 }
 
 async function createBranch(ticketNumber, serviceName = null) {
-  if (!checkRoot()) {
-    log('Error: This script must be run as root (use sudo)', 'red');
+  // Only require root on production servers
+  const environment = getEnvironment();
+  if (environment === 'production' && !checkRoot()) {
+    log('Error: This script must be run as root (use sudo) on production servers', 'red');
     process.exit(1);
   }
   
@@ -1709,8 +1789,18 @@ async function setupRepoConfig() {
     
     const location = await question('\nSelect location (1-3, default: 1): ') || '1';
     
+    // Ask about environment
+    log('\n=== Environment Configuration ===', 'cyan', true);
+    log('\nAre you configuring for:', 'reset', true);
+    log('1. Development environment (no sudo required)', 'reset', true);
+    log('2. Production environment (requires sudo)', 'reset', true);
+    
+    const envChoice = await question('\nSelect environment (1-2, default: 1): ') || '1';
+    const environment = envChoice === '2' ? 'production' : 'development';
+    
     const config = {
       repoRoot: rootPath,
+      environment: environment,
       created: new Date().toISOString(),
       version: '1.0'
     };
@@ -1729,10 +1819,11 @@ async function setupRepoConfig() {
         break;
         
       case '3':
-        log('\nTo use environment variable, add this to your shell profile:', 'reset', true);
+        log('\nTo use environment variables, add these to your shell profile:', 'reset', true);
         log(`export REN360_REPO_ROOT="${rootPath}"`, 'green', true);
+        log(`export REN360_ENVIRONMENT="${environment}"`, 'green', true);
         log('\nOr run this command:', 'reset', true);
-        log(`REN360_REPO_ROOT="${rootPath}" node repo-manager.js`, 'green', true);
+        log(`REN360_REPO_ROOT="${rootPath}" REN360_ENVIRONMENT="${environment}" node repo-manager.js`, 'green', true);
         break;
         
       default:
@@ -1974,8 +2065,9 @@ async function interactiveMode() {
         break;
         
       case '4':
-        if (!checkRoot()) {
-          log('Error: Branch updates require root privileges. Please run with sudo.', 'red');
+        const environment4 = getEnvironment();
+        if (environment4 === 'production' && !checkRoot()) {
+          log('Error: Branch updates require root privileges on production. Please run with sudo.', 'red');
           break;
         }
         const branchAll = await question('Enter target branch: ');
@@ -1983,8 +2075,9 @@ async function interactiveMode() {
         break;
         
       case '5':
-        if (!checkRoot()) {
-          log('Error: Branch updates require root privileges. Please run with sudo.', 'red');
+        const environment5 = getEnvironment();
+        if (environment5 === 'production' && !checkRoot()) {
+          log('Error: Branch updates require root privileges on production. Please run with sudo.', 'red');
           break;
         }
         const serviceName = await question('Enter service name: ');
@@ -1993,8 +2086,9 @@ async function interactiveMode() {
         break;
         
       case '6':
-        if (!checkRoot()) {
-          log('Error: Branch creation requires root privileges. Please run with sudo.', 'red');
+        const environment6 = getEnvironment();
+        if (environment6 === 'production' && !checkRoot()) {
+          log('Error: Branch creation requires root privileges on production. Please run with sudo.', 'red');
           break;
         }
         const ticketNumber = await question('Enter ticket number (e.g., 1234 for REN-1234): ');
@@ -2050,12 +2144,25 @@ async function main() {
     }
   }
   
+  // Expand tilde in REPO_ROOT if present
+  if (REPO_ROOT.startsWith('~')) {
+    REPO_ROOT = path.join(os.homedir(), REPO_ROOT.slice(1));
+  }
+  
   // Initialize services with the configured REPO_ROOT
   initializeServices();
+  
+  // Get the current environment
+  const currentEnvironment = getEnvironment();
   
   // Show repo root if verbose or if custom root is used
   if (REPO_ROOT !== DEFAULT_REPO_ROOT) {
     console.log(`${colors.cyan}Using repository root: ${REPO_ROOT}${colors.reset}`);
+  }
+  
+  // Show environment if verbose or if explicitly set via command line
+  if (VERBOSE || args.some(arg => arg.startsWith('--env='))) {
+    console.log(`${colors.cyan}Environment: ${currentEnvironment}${colors.reset}`);
   }
   
   // Check for verbose flag
@@ -2066,6 +2173,12 @@ async function main() {
     if (index > -1) args.splice(index, 1);
     const vIndex = args.indexOf('-v');
     if (vIndex > -1) args.splice(vIndex, 1);
+  }
+  
+  // Remove --env flag from args if present
+  const envArgIndex = args.findIndex(arg => arg.startsWith('--env='));
+  if (envArgIndex > -1) {
+    args.splice(envArgIndex, 1);
   }
   
   if (args.length === 0) {
@@ -2256,6 +2369,7 @@ Usage:
 Options:
   --repo-root=PATH   # Set custom repository root directory
   -r PATH            # Set custom repository root directory (short form)
+  --env=development  # Set environment (development or production)
   --verbose, -v      # Show detailed output during operations
   --composer-update  # Use composer update instead of install
   --skip-deps        # Skip composer/npm install entirely
@@ -2268,6 +2382,13 @@ Configuration:
   3. Config file (.ren360rc) in current directory or home directory
   4. .env file: REPO_ROOT=/path/to/repos
   5. Default: ${DEFAULT_REPO_ROOT}
+
+  Environment can be configured in multiple ways (in order of precedence):
+  1. Command line: --env=development or --env=production
+  2. Environment variable: REN360_ENVIRONMENT=development
+  3. Config file (.ren360rc) with "environment" field
+  4. .env file: ENVIRONMENT=development
+  5. Auto-detected (Linux with /var/amarki = production, else development)
 
 Examples:
   node repo-manager.js list
