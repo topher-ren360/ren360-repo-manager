@@ -20,15 +20,27 @@ A Node.js-based tool for managing REN360 microservice repositories. This tool pr
    node --version
    ```
 
-2. Make the script executable:
+2. Clone the repository:
    ```bash
-   chmod +x ~/ren360/repo-manager.js
+   git clone https://github.com/topher-ren360/ren360-repo-manager.git
+   cd ren360-repo-manager
    ```
 
-3. (Optional) Install globally for easier access:
+3. Configure your repository root directory:
    ```bash
-   sudo npm link ~/ren360/
-   # Now you can use 'repo-manager' from anywhere
+   # Interactive setup
+   node repo-manager.js setup-config
+   
+   # Or use environment variable
+   export REN360_REPO_ROOT="/path/to/your/repos"
+   
+   # Or command line
+   node repo-manager.js --repo-root=/path/to/your/repos list
+   ```
+
+4. (Optional) Make the script executable:
+   ```bash
+   chmod +x repo-manager.js
    ```
 
 ## Usage
@@ -149,6 +161,72 @@ Failed to update: 1 service(s)
   ✗ intelligence: Branch 'develop' does not exist in remote
 
 Log saved to: /home/cmckenna/ren360/update-log-2025-06-20T15-45-23.json
+```
+
+## Configuration
+
+### Repository Root Directory
+
+The tool needs to know where your microservice repositories are located. The default is `/var/amarki/repository`, but you can configure a custom location.
+
+#### Configuration Methods (in order of precedence):
+
+1. **Command Line Flag**:
+   ```bash
+   node repo-manager.js --repo-root=/custom/path list
+   # or short form
+   node repo-manager.js -r /custom/path list
+   ```
+
+2. **Environment Variable**:
+   ```bash
+   export REN360_REPO_ROOT="/custom/path"
+   node repo-manager.js list
+   ```
+
+3. **Configuration File**:
+   Create a `.ren360rc` file in your current directory or home directory:
+   ```json
+   {
+     "repoRoot": "/custom/path",
+     "version": "1.0"
+   }
+   ```
+
+4. **.env File**:
+   Add to your `.env` file:
+   ```
+   REPO_ROOT=/custom/path
+   ```
+
+#### Setup Wizard
+
+The easiest way to configure the repository root is using the setup wizard:
+```bash
+node repo-manager.js setup-config
+```
+
+This will:
+- Ask for your repository root directory
+- Create the directory if it doesn't exist
+- Save the configuration to your preferred location
+- Test that services can be found
+
+### Expected Directory Structure
+
+Your repositories should be organized as:
+```
+/your/repo/root/
+├── microAds/
+├── microEmails/
+├── microFrontend/
+├── microImages/
+├── microIntegrations/
+├── microIntelligence/
+├── microSms/
+├── microSocial/
+├── microTemplates/
+└── microUsers/
 ```
 
 ## Features in Detail

@@ -4,6 +4,7 @@ const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
+const os = require('os');
 
 // Import AI Agent if available
 let AIAgent, loadApiKey, getModel, getMaxTokens;
@@ -48,19 +49,69 @@ const colors = {
   white: '\x1b[37m'
 };
 
-// Service definitions
-const services = {
-  ads: '/var/amarki/repository/microAds/',
-  emails: '/var/amarki/repository/microEmails/',
-  frontend: '/var/amarki/repository/microFrontend/',
-  images: '/var/amarki/repository/microImages/',
-  integrations: '/var/amarki/repository/microIntegrations/',
-  intelligence: '/var/amarki/repository/microIntelligence/',
-  sms: '/var/amarki/repository/microSms/',
-  social: '/var/amarki/repository/microSocial/',
-  templates: '/var/amarki/repository/microTemplates/',
-  users: '/var/amarki/repository/microUsers/'
-};
+// Configuration
+const DEFAULT_REPO_ROOT = '/var/amarki/repository';
+let REPO_ROOT = DEFAULT_REPO_ROOT;
+
+// Check for custom repository root from environment or config file
+function getRepoRoot() {
+  // 1. Check environment variable
+  if (process.env.REN360_REPO_ROOT) {
+    return process.env.REN360_REPO_ROOT;
+  }
+  
+  // 2. Check .ren360rc config file in current directory
+  const localConfig = path.join(process.cwd(), '.ren360rc');
+  if (fs.existsSync(localConfig)) {
+    try {
+      const config = JSON.parse(fs.readFileSync(localConfig, 'utf8'));
+      if (config.repoRoot) {
+        return config.repoRoot;
+      }
+    } catch (error) {
+      console.error(`Error reading ${localConfig}: ${error.message}`);
+    }
+  }
+  
+  // 3. Check .ren360rc config file in home directory
+  const homeConfig = path.join(require('os').homedir(), '.ren360rc');
+  if (fs.existsSync(homeConfig)) {
+    try {
+      const config = JSON.parse(fs.readFileSync(homeConfig, 'utf8'));
+      if (config.repoRoot) {
+        return config.repoRoot;
+      }
+    } catch (error) {
+      console.error(`Error reading ${homeConfig}: ${error.message}`);
+    }
+  }
+  
+  // 4. Check .env file for REPO_ROOT
+  const repoRootFromEnv = loadEnvVar('REPO_ROOT');
+  if (repoRootFromEnv) {
+    return repoRootFromEnv;
+  }
+  
+  return DEFAULT_REPO_ROOT;
+}
+
+// Service definitions (will be populated based on REPO_ROOT)
+let services = {};
+
+function initializeServices() {
+  services = {
+    ads: path.join(REPO_ROOT, 'microAds/'),
+    emails: path.join(REPO_ROOT, 'microEmails/'),
+    frontend: path.join(REPO_ROOT, 'microFrontend/'),
+    images: path.join(REPO_ROOT, 'microImages/'),
+    integrations: path.join(REPO_ROOT, 'microIntegrations/'),
+    intelligence: path.join(REPO_ROOT, 'microIntelligence/'),
+    sms: path.join(REPO_ROOT, 'microSms/'),
+    social: path.join(REPO_ROOT, 'microSocial/'),
+    templates: path.join(REPO_ROOT, 'microTemplates/'),
+    users: path.join(REPO_ROOT, 'microUsers/')
+  };
+}
 
 // Global verbose flag
 let VERBOSE = false;
@@ -1607,6 +1658,118 @@ async function createBranch(ticketNumber, serviceName = null) {
   return results;
 }
 
+async function setupRepoConfig() {
+  log('\n=== Repository Configuration Setup ===\n', 'cyan', true);
+  
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+  
+  const question = (query) => new Promise((resolve) => rl.question(query, resolve));
+  
+  try {
+    log('This tool will help you configure the repository root directory.', 'reset', true);
+    log(`Current repository root: ${REPO_ROOT}`, 'yellow', true);
+    
+    const newRoot = await question('\nEnter new repository root (or press Enter to keep current): ');
+    
+    if (!newRoot || newRoot.trim() === '') {
+      log('\nKeeping current configuration.', 'yellow', true);
+      rl.close();
+      return;
+    }
+    
+    const rootPath = path.resolve(newRoot.trim());
+    
+    // Verify the path exists
+    if (!fs.existsSync(rootPath)) {
+      const create = await question(`\nDirectory ${rootPath} does not exist. Create it? (y/N): `);
+      if (create.toLowerCase() === 'y') {
+        try {
+          fs.mkdirSync(rootPath, { recursive: true });
+          log('✓ Directory created', 'green', true);
+        } catch (error) {
+          log(`✗ Failed to create directory: ${error.message}`, 'red', true);
+          rl.close();
+          return;
+        }
+      } else {
+        log('\nConfiguration cancelled.', 'yellow', true);
+        rl.close();
+        return;
+      }
+    }
+    
+    // Ask where to save the config
+    log('\nWhere would you like to save the configuration?', 'reset', true);
+    log('1. Current directory (.ren360rc)', 'reset', true);
+    log('2. Home directory (~/.ren360rc)', 'reset', true);
+    log('3. Environment variable (show command)', 'reset', true);
+    
+    const location = await question('\nSelect location (1-3, default: 1): ') || '1';
+    
+    const config = {
+      repoRoot: rootPath,
+      created: new Date().toISOString(),
+      version: '1.0'
+    };
+    
+    switch (location) {
+      case '1':
+        const localPath = path.join(process.cwd(), '.ren360rc');
+        fs.writeFileSync(localPath, JSON.stringify(config, null, 2));
+        log(`\n✓ Configuration saved to ${localPath}`, 'green', true);
+        break;
+        
+      case '2':
+        const homePath = path.join(require('os').homedir(), '.ren360rc');
+        fs.writeFileSync(homePath, JSON.stringify(config, null, 2));
+        log(`\n✓ Configuration saved to ${homePath}`, 'green', true);
+        break;
+        
+      case '3':
+        log('\nTo use environment variable, add this to your shell profile:', 'reset', true);
+        log(`export REN360_REPO_ROOT="${rootPath}"`, 'green', true);
+        log('\nOr run this command:', 'reset', true);
+        log(`REN360_REPO_ROOT="${rootPath}" node repo-manager.js`, 'green', true);
+        break;
+        
+      default:
+        log('\nInvalid option. Configuration cancelled.', 'yellow', true);
+        rl.close();
+        return;
+    }
+    
+    // Test the configuration
+    log('\nTesting configuration...', 'yellow', true);
+    REPO_ROOT = rootPath;
+    initializeServices();
+    
+    let foundServices = 0;
+    for (const [name, servicePath] of Object.entries(services)) {
+      if (fs.existsSync(servicePath)) {
+        foundServices++;
+      }
+    }
+    
+    if (foundServices > 0) {
+      log(`✓ Found ${foundServices} service(s) at the configured location`, 'green', true);
+    } else {
+      log('⚠ No services found at the configured location', 'yellow', true);
+      log('  Services are expected to be in subdirectories like:', 'reset', true);
+      log(`  ${path.join(rootPath, 'microAds/')}`, 'reset', true);
+      log(`  ${path.join(rootPath, 'microEmails/')}`, 'reset', true);
+      log('  etc.', 'reset', true);
+    }
+    
+  } catch (error) {
+    log(`\nSetup error: ${error.message}`, 'red', true);
+  } finally {
+    rl.close();
+  }
+}
+
 async function setupGitHubToken() {
   log('\n=== GitHub Token Setup ===\n', 'cyan', true);
   
@@ -1870,6 +2033,31 @@ async function interactiveMode() {
 async function main() {
   const args = process.argv.slice(2);
   
+  // Check for repo-root flag
+  const repoRootIndex = args.findIndex(arg => arg.startsWith('--repo-root='));
+  if (repoRootIndex !== -1) {
+    REPO_ROOT = args[repoRootIndex].split('=')[1];
+    args.splice(repoRootIndex, 1);
+  } else {
+    // Check for -r flag
+    const rIndex = args.indexOf('-r');
+    if (rIndex !== -1 && args[rIndex + 1]) {
+      REPO_ROOT = args[rIndex + 1];
+      args.splice(rIndex, 2);
+    } else {
+      // Use configured repo root
+      REPO_ROOT = getRepoRoot();
+    }
+  }
+  
+  // Initialize services with the configured REPO_ROOT
+  initializeServices();
+  
+  // Show repo root if verbose or if custom root is used
+  if (REPO_ROOT !== DEFAULT_REPO_ROOT) {
+    console.log(`${colors.cyan}Using repository root: ${REPO_ROOT}${colors.reset}`);
+  }
+  
   // Check for verbose flag
   if (args.includes('--verbose') || args.includes('-v')) {
     VERBOSE = true;
@@ -2034,6 +2222,11 @@ async function main() {
       await setupGitHubToken();
       break;
       
+    case 'setup-config':
+    case 'config':
+      await setupRepoConfig();
+      break;
+      
     case 'help':
     case '--help':
     case '-h':
@@ -2054,16 +2247,27 @@ Usage:
   node repo-manager.js pr [service] --title="title" [options]  # Create PR
   node repo-manager.js prs [--state=open|closed|all]       # List all PRs
   node repo-manager.js review <ticket-number> [--analyze]  # Review PRs by ticket
+  node repo-manager.js setup-config                        # Configure repository root
   node repo-manager.js setup-ai                            # Configure AI agent
   node repo-manager.js setup-github                        # Configure GitHub token
   node repo-manager.js update <branch> [service] [options]  # Update to branch
   node repo-manager.js create <ticket> [service]  # Create REN-<ticket> branch from dev
 
 Options:
+  --repo-root=PATH   # Set custom repository root directory
+  -r PATH            # Set custom repository root directory (short form)
   --verbose, -v      # Show detailed output during operations
   --composer-update  # Use composer update instead of install
   --skip-deps        # Skip composer/npm install entirely
   --force, -f        # Skip confirmation prompts (use with caution!)
+
+Configuration:
+  Repository root can be configured in multiple ways (in order of precedence):
+  1. Command line: --repo-root=/path/to/repos or -r /path/to/repos
+  2. Environment variable: REN360_REPO_ROOT=/path/to/repos
+  3. Config file (.ren360rc) in current directory or home directory
+  4. .env file: REPO_ROOT=/path/to/repos
+  5. Default: ${DEFAULT_REPO_ROOT}
 
 Examples:
   node repo-manager.js list
