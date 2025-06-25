@@ -453,6 +453,104 @@ async function showRepositoryStatus(serviceName = null) {
   log(`Summary: ${colors.green}${clean} clean${colors.reset}, ${colors.yellow}${withIssues} need attention${colors.reset}${withErrors > 0 ? `, ${colors.red}${withErrors} errors${colors.reset}` : ''}`, 'reset', true);
 }
 
+async function showUncommittedChanges(serviceName = null) {
+  log('\n=== Uncommitted Changes ===\n', 'cyan', true);
+  
+  const servicesToCheck = serviceName 
+    ? { [serviceName]: services[serviceName] }
+    : services;
+    
+  if (serviceName && !services[serviceName]) {
+    log(`Error: Service '${serviceName}' not found`, 'red', true);
+    return;
+  }
+  
+  let totalChangedFiles = 0;
+  let servicesWithChanges = 0;
+  
+  for (const [name, path] of Object.entries(servicesToCheck)) {
+    try {
+      if (!fs.existsSync(path)) {
+        continue;
+      }
+      
+      // Get git status
+      const statusOutput = gitCommand(path, 'status --porcelain');
+      
+      if (statusOutput) {
+        servicesWithChanges++;
+        const changes = statusOutput.split('\n').filter(line => line.trim());
+        totalChangedFiles += changes.length;
+        
+        log(`\n${colors.yellow}${name}:${colors.reset} ${changes.length} file(s) with changes`, 'reset', true);
+        
+        // Show file details
+        changes.forEach(change => {
+          const [status, ...fileParts] = change.trim().split(' ');
+          const fileName = fileParts.join(' ');
+          
+          let statusText = '';
+          let statusColor = 'reset';
+          
+          if (status.includes('M')) {
+            statusText = 'modified';
+            statusColor = 'yellow';
+          } else if (status.includes('A')) {
+            statusText = 'added';
+            statusColor = 'green';
+          } else if (status.includes('D')) {
+            statusText = 'deleted';
+            statusColor = 'red';
+          } else if (status === '??') {
+            statusText = 'untracked';
+            statusColor = 'magenta';
+          } else if (status.includes('R')) {
+            statusText = 'renamed';
+            statusColor = 'blue';
+          } else {
+            statusText = status;
+          }
+          
+          log(`  ${colors[statusColor]}${statusText.padEnd(10)}${colors.reset} ${fileName}`, 'reset', true);
+        });
+        
+        // Show diff stats if verbose
+        if (VERBOSE) {
+          try {
+            const diffStat = gitCommand(path, 'diff --stat');
+            if (diffStat) {
+              log('\n  Diff statistics:', 'reset', true);
+              diffStat.split('\n').forEach(line => {
+                if (line.trim()) {
+                  log(`    ${line}`, 'reset', true);
+                }
+              });
+            }
+          } catch {}
+        }
+      }
+    } catch (error) {
+      log(`${name}: ${colors.red}Error - ${error.message}${colors.reset}`, 'reset', true);
+    }
+  }
+  
+  // Summary
+  log('\n' + '='.repeat(50), 'reset', true);
+  
+  if (servicesWithChanges === 0) {
+    log('No uncommitted changes found in any service.', 'green', true);
+  } else {
+    log(`Found ${colors.yellow}${totalChangedFiles} uncommitted file(s)${colors.reset} across ${colors.yellow}${servicesWithChanges} service(s)${colors.reset}`, 'reset', true);
+    
+    if (!VERBOSE) {
+      log('\nUse --verbose to see diff statistics', 'reset', true);
+    }
+    
+    log('\nTo save changes across all services:', 'reset', true);
+    log('  node repo-manager.js stash save "work in progress"', 'green', true);
+  }
+}
+
 async function updateBranches(targetBranch, serviceName = null, useComposerUpdate = false, skipDeps = false) {
   if (!checkRoot()) {
     log('Error: This script must be run as root (use sudo)', 'red', true);
@@ -867,6 +965,149 @@ async function manageStash(action, message = '') {
   }
 }
 
+async function dropUncommittedChanges(serviceName = null, force = false) {
+  log(`\n=== Drop Uncommitted Changes ===\n`, 'cyan', true);
+  
+  const servicesToProcess = serviceName 
+    ? { [serviceName]: services[serviceName] }
+    : services;
+    
+  if (serviceName && !services[serviceName]) {
+    log(`Error: Service '${serviceName}' not found`, 'red', true);
+    return;
+  }
+  
+  // Check if we need confirmation
+  if (!force) {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout
+    });
+    
+    const question = (query) => new Promise((resolve) => rl.question(query, resolve));
+    
+    try {
+      log(`${colors.yellow}WARNING: This will permanently delete all uncommitted changes!${colors.reset}`, 'reset', true);
+      log('This includes:', 'reset', true);
+      log('  - Modified files', 'reset', true);
+      log('  - Staged changes', 'reset', true);
+      log('  - Untracked files', 'reset', true);
+      
+      const confirm = await question(`\nAre you sure you want to drop all uncommitted changes${serviceName ? ` in ${serviceName}` : ' in ALL services'}? (yes/N): `);
+      rl.close();
+      
+      if (confirm.toLowerCase() !== 'yes') {
+        log('\nOperation cancelled.', 'yellow', true);
+        return;
+      }
+    } catch (error) {
+      rl.close();
+      throw error;
+    }
+  }
+  
+  const results = [];
+  
+  for (const [name, path] of Object.entries(servicesToProcess)) {
+    if (!VERBOSE) {
+      process.stdout.write(`${colors.yellow}${name}${colors.reset}... `);
+    } else {
+      log(`\nDropping changes in ${name}...`, 'yellow');
+    }
+    
+    try {
+      if (!fs.existsSync(path)) {
+        results.push({ service: name, success: false, error: 'Directory not found' });
+        if (!VERBOSE) console.log(`${colors.red}✗${colors.reset}`);
+        continue;
+      }
+      
+      // Check if there are changes
+      let hasChanges = false;
+      try {
+        gitCommand(path, 'diff-index --quiet HEAD --');
+      } catch {
+        hasChanges = true;
+      }
+      
+      // Check for untracked files
+      const untrackedFiles = gitCommand(path, 'ls-files --others --exclude-standard');
+      if (untrackedFiles) {
+        hasChanges = true;
+      }
+      
+      if (!hasChanges) {
+        results.push({ service: name, success: true, status: 'no changes' });
+        if (!VERBOSE) {
+          console.log(`${colors.green}✓ (no changes)${colors.reset}`);
+        } else {
+          log('No changes to drop', 'green');
+        }
+        continue;
+      }
+      
+      // Reset all tracked files to HEAD
+      log('Resetting tracked files...');
+      gitCommand(path, 'reset --hard HEAD');
+      
+      // Remove all untracked files and directories
+      log('Removing untracked files and directories...');
+      gitCommand(path, 'clean -fd');
+      
+      // Get the current branch for logging
+      const currentBranch = gitCommand(path, 'rev-parse --abbrev-ref HEAD');
+      
+      results.push({ 
+        service: name, 
+        success: true, 
+        status: 'changes dropped',
+        branch: currentBranch
+      });
+      
+      if (!VERBOSE) {
+        console.log(`${colors.green}✓${colors.reset}`);
+      } else {
+        log(`Success: All changes dropped in ${name} (${currentBranch})`, 'green');
+      }
+      
+    } catch (error) {
+      results.push({ service: name, success: false, error: error.message });
+      if (!VERBOSE) {
+        console.log(`${colors.red}✗${colors.reset}`);
+      } else {
+        log(`Error: ${error.message}`, 'red');
+      }
+    }
+    
+    if (VERBOSE) {
+      log('----------------------------------------');
+    }
+  }
+  
+  // Summary
+  log('\n' + '='.repeat(50), 'reset', true);
+  
+  const successful = results.filter(r => r.success);
+  const withChanges = successful.filter(r => r.status === 'changes dropped');
+  const noChanges = successful.filter(r => r.status === 'no changes');
+  const failed = results.filter(r => !r.success);
+  
+  if (withChanges.length > 0) {
+    log(`${colors.green}Dropped changes in ${withChanges.length} service(s)${colors.reset}`, 'reset', true);
+    withChanges.forEach(r => log(`  ✓ ${r.service} (${r.branch})`, 'green', true));
+  }
+  
+  if (noChanges.length > 0) {
+    log(`\n${colors.yellow}No changes to drop in ${noChanges.length} service(s)${colors.reset}`, 'reset', true);
+    noChanges.forEach(r => log(`  - ${r.service}`, 'yellow', true));
+  }
+  
+  if (failed.length > 0) {
+    log(`\n${colors.red}Failed to process ${failed.length} service(s)${colors.reset}`, 'reset', true);
+    failed.forEach(r => log(`  ✗ ${r.service}: ${r.error}`, 'red', true));
+  }
+}
+
 async function createPullRequest(options = {}) {
   const { title, body, draft = false, service: serviceName } = options;
   
@@ -994,7 +1235,11 @@ async function reviewPullRequests(ticketNumber, options = {}) {
       }
       
       // Use GitHub CLI to find PRs with the ticket number
-      const prListCommand = `gh pr list --search "${searchPattern}" --state all --json number,title,state,url,isDraft,createdAt,author,headRefName`;
+      // Run gh as www-data user to avoid ownership issues
+      const ghEnv = ghToken ? `GH_TOKEN=${ghToken} ` : '';
+      const prListCommand = checkRoot()
+        ? `sudo -u www-data ${ghEnv}gh pr list --search "${searchPattern}" --state all --json number,title,state,url,isDraft,createdAt,author,headRefName`
+        : `${ghEnv}gh pr list --search "${searchPattern}" --state all --json number,title,state,url,isDraft,createdAt,author,headRefName`;
       const prsJson = execCommand(prListCommand, { cwd: path });
       
       if (prsJson && prsJson.trim() !== '[]') {
@@ -1002,7 +1247,9 @@ async function reviewPullRequests(ticketNumber, options = {}) {
         
         for (const pr of prs) {
           // Get PR details including files changed
-          const prDetailsCommand = `gh pr view ${pr.number} --json files,additions,deletions,body,reviews,comments`;
+          const prDetailsCommand = checkRoot()
+            ? `sudo -u www-data ${ghEnv}gh pr view ${pr.number} --json files,additions,deletions,body,reviews,comments`
+            : `${ghEnv}gh pr view ${pr.number} --json files,additions,deletions,body,reviews,comments`;
           const prDetails = JSON.parse(execCommand(prDetailsCommand, { cwd: path }));
           
           const prInfo = {
@@ -1170,7 +1417,11 @@ async function listAllPullRequests(options = {}) {
       }
       
       // List PRs for this service
-      const prListCommand = `gh pr list --state ${state} --json number,title,state,url,isDraft,createdAt,author,headRefName --limit 50`;
+      // Run gh as www-data user to avoid ownership issues
+      const ghEnv = ghToken ? `GH_TOKEN=${ghToken} ` : '';
+      const prListCommand = checkRoot() 
+        ? `sudo -u www-data ${ghEnv}gh pr list --state ${state} --json number,title,state,url,isDraft,createdAt,author,headRefName --limit 50`
+        : `${ghEnv}gh pr list --state ${state} --json number,title,state,url,isDraft,createdAt,author,headRefName --limit 50`;
       const prsJson = execCommand(prListCommand, { cwd: path });
       
       if (prsJson && prsJson.trim() !== '[]') {
@@ -1539,9 +1790,11 @@ async function interactiveMode() {
     console.log('5. Update single service to a branch');
     console.log('6. Create new branch from dev (REN-<ticket>)');
     console.log('7. Show repository status');
-    console.log('8. Exit');
+    console.log('8. Show uncommitted changes');
+    console.log('9. Drop uncommitted changes');
+    console.log('10. Exit');
     
-    const choice = await question('\nSelect an option (1-8): ');
+    const choice = await question('\nSelect an option (1-10): ');
     
     switch (choice) {
       case '1':
@@ -1592,6 +1845,16 @@ async function interactiveMode() {
         break;
         
       case '8':
+        const serviceForChanges = await question('Enter service name (or press Enter for all services): ');
+        await showUncommittedChanges(serviceForChanges || null);
+        break;
+        
+      case '9':
+        const serviceForDrop = await question('Enter service name (or press Enter for all services): ');
+        await dropUncommittedChanges(serviceForDrop || null, false);
+        break;
+        
+      case '10':
         rl.close();
         process.exit(0);
         
@@ -1665,6 +1928,12 @@ async function main() {
       await showRepositoryStatus(statusService);
       break;
       
+    case 'changes':
+    case 'uncommitted':
+      const changesService = args[1];
+      await showUncommittedChanges(changesService);
+      break;
+      
     case 'sync':
     case 'pull':
       const syncService = args[1];
@@ -1710,6 +1979,13 @@ async function main() {
       }
       const stashMessage = stashAction === 'save' && args[2] ? args.slice(2).join(' ') : '';
       await manageStash(stashAction, stashMessage);
+      break;
+      
+    case 'drop':
+    case 'drop-changes':
+      const dropService = args[1] && !args[1].startsWith('--') ? args[1] : undefined;
+      const dropForce = args.includes('--force') || args.includes('-f');
+      await dropUncommittedChanges(dropService, dropForce);
       break;
       
     case 'pr':
@@ -1769,6 +2045,8 @@ Usage:
   node repo-manager.js list                  # List current branches
   node repo-manager.js branches [service]    # List available branches
   node repo-manager.js status [service]       # Show repository status
+  node repo-manager.js changes [service]      # Show uncommitted changes
+  node repo-manager.js drop [service] [--force]  # Drop uncommitted changes
   node repo-manager.js sync [service]         # Pull latest changes on current branches
   node repo-manager.js search <pattern> [service] [--include=glob]  # Search across repos
   node repo-manager.js recent [service] [--days=N] [--count=N]  # Show recent commits
@@ -1785,6 +2063,7 @@ Options:
   --verbose, -v      # Show detailed output during operations
   --composer-update  # Use composer update instead of install
   --skip-deps        # Skip composer/npm install entirely
+  --force, -f        # Skip confirmation prompts (use with caution!)
 
 Examples:
   node repo-manager.js list
@@ -1799,6 +2078,11 @@ Examples:
   sudo node repo-manager.js create 1234 frontend  # Create REN-1234 only for frontend
   node repo-manager.js status                # Show status of all repos
   node repo-manager.js status frontend       # Show status of specific repo
+  node repo-manager.js changes               # Show uncommitted changes in all repos
+  node repo-manager.js changes frontend      # Show uncommitted changes in specific repo
+  node repo-manager.js drop                  # Drop all uncommitted changes (with confirmation)
+  node repo-manager.js drop frontend         # Drop changes in specific repo
+  node repo-manager.js drop --force          # Drop changes without confirmation
   node repo-manager.js sync                  # Pull latest for all repos
   node repo-manager.js sync frontend         # Pull latest for specific repo
   node repo-manager.js search "TODO"         # Find TODOs in all repos
